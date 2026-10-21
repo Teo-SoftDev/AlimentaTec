@@ -1,24 +1,23 @@
 import React from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
+import AccessDenied from "./AccessDenied.jsx";
+import { Spinner } from "./ui.jsx";
 
-export default function ProtectedRoute({ children }) {
-  const { user, cargandoSesion } = useAuth();
+// A01: autenticación + verificación de rol/permiso ANTES de renderizar la vista.
+export default function ProtectedRoute({ children, permission = "view" }) {
+  const { user, cargandoSesion, rolReady, can, profile } = useAuth();
+  const location = useLocation();
 
-  if (cargandoSesion) {
+  if (cargandoSesion || (user && !rolReady)) {
     return (
-      <div className="h-full flex items-center justify-center bg-surface">
-        <div className="flex items-center gap-2 text-secondary text-sm">
-          <span className="material-symbols-outlined animate-spin text-lg">progress_activity</span>
-          Verificando sesión…
-        </div>
+      <div className="min-h-screen flex items-center justify-center bg-surface">
+        <Spinner label="Verificando sesión y permisos…" />
       </div>
     );
   }
-
-  if (!user) {
-    return <Navigate to="/" replace />;
-  }
-
+  if (!user) return <Navigate to="/" replace state={{ from: location.pathname }} />;
+  if (profile?.disabled) return <AccessDenied disabled />;
+  if (!can(permission)) return <AccessDenied />;
   return children;
 }

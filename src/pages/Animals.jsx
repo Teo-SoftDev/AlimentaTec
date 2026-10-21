@@ -1,485 +1,189 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
+import { deleteDoc, doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { db } from "../firebase.js";
 import AppLayout from "../components/AppLayout.jsx";
+import ConfirmDialog from "../components/ConfirmDialog.jsx";
+import LineChart from "../components/LineChart.jsx";
+import NumberStepper from "../components/NumberStepper.jsx";
+import ToggleSwitch from "../components/ToggleSwitch.jsx";
+import { Banner, Card, DemoBadge, Field, PageHeader, btnOutline, btnPrimary, inputCls } from "../components/ui.jsx";
+import { useAuth } from "../context/AuthContext.jsx";
+import { useCollection } from "../hooks/useCollection.js";
+import { writeAudit } from "../services/audit.js";
+import { DEMO_BATCHES } from "../utils/demoData.js";
+import { friendlyError } from "../utils/errors.js";
+import { checkWriteRate, formatRetry } from "../utils/rateLimiter.js";
+import { BATCH_STAGES, FEED_TYPES, batchSchema, validate } from "../utils/validation.js";
+import { PONDS, pondName } from "../utils/constants.js";
 
-const FOOD_TYPES = [
-  { id: "pellet", label: "Pellet flotante 4mm", detail: "42% Proteína / 18% Lípidos" },
-  { id: "biomasa", label: "Biomasa húmeda controlada", detail: "Enriquecida con spirulina" },
-  { id: "heno", label: "Heno enriquecido", detail: "Fibra larga + Calcio orgánico" },
-  { id: "granulos", label: "Gránulos micro-extruidos", detail: "1.2mm Alta digestibilidad" },
-];
+const STAGE_LABELS = { alevinaje: "Alevinaje", crecimiento: "Crecimiento", engorde: "Engorde", adulto: "Adulto / mantenimiento" };
+const FEED_LABELS = { pellet: "Pellet flotante 4 mm", biomasa: "Biomasa húmeda controlada", micro: "Gránulo micro-extruido 1,2 mm", gránulo: "Gránulo estándar" };
 
-const VET_PROTOCOLS = [
-  {
-    icon: "check_circle",
-    iconColor: "text-[#065F46]",
-    title: "Baño de inmersión profiláctico:",
-    detail: "Completado sin anomalías el 12 de Mayo.",
-  },
-  {
-    icon: "schedule",
-    iconColor: "text-[#D97706]",
-    title: "Monitoreo Lipídico en Hígado:",
-    detail: "Programado para la próxima semana (Semana 14).",
-  },
-];
+// Tasa base (% de biomasa/día) por peso medio y corrección por temperatura del agua.
+const baseRate = (g) => (g < 5 ? 6 : g < 20 ? 4 : g < 100 ? 2.8 : g < 300 ? 2 : 1.4);
+const tempFactor = (t) => (t < 10 ? 0.6 : t < 14 ? 0.8 : t <= 18 ? 1 : t <= 22 ? 1.1 : 0.7);
+
+const BLANK = { code: "", name: "", species: "", pondId: "AQ-04", stage: "crecimiento", population: 1000, avgWeightG: 100, waterTempC: 15, feedType: "pellet", autoFeeding: true, quarantine: false, notes: "" };
 
 export default function Animals() {
-  const [foodType, setFoodType] = useState("pellet");
-  const [guardado, setGuardado] = useState(false);
+  const { actor, can } = useAuth();
+  const { items, isDemo, error } = useCollection("batches", { orderByField: "code", limitN: 200, fallback: DEMO_BATCHES });
+  const [form, setForm] = useState(BLANK);
+  const [errors, setErrors] = useState({});
+  const [notice, setNotice] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [toDelete, setToDelete] = useState(null);
+  const canWrite = can("animals:write");
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  function handleSubmit(e) {
+  const calc = useMemo(() => {
+    const pop = Number.isFinite(form.population) ? form.population : 0;
+    const w = Number.isFinite(form.avgWeightG) ? form.avgWeightG : 0;
+    const t = Number.isFinite(form.waterTempC) ? form.waterTempC : 15;
+    const biomassKg = (pop * w) / 1000;
+    const rate = baseRate(w) * tempFactor(t);
+    const dailyKg = (biomassKg * rate) / 100;
+    const doses = w < 20 ? 8 : w < 100 ? 6 : 4;
+    const sgr = 1.4 * tempFactor(t) * (w < 100 ? 1.3 : w < 500 ? 1 : 0.7); // %/día (modelo simplificado)
+    const weeks = Array.from({ length: 13 }, (_, i) => i);
+    return { biomassKg, rate, dailyKg, doses, perDose: dailyKg / doses, sgr, weeks, curve: weeks.map((i) => w * Math.exp((sgr / 100) * 7 * i)) };
+  }, [form.population, form.avgWeightG, form.waterTempC]);
+
+  async function save(e) {
     e.preventDefault();
-    setGuardado(true);
-    setTimeout(() => setGuardado(false), 2500);
+    setNotice(null); setErrors({});
+    if (!canWrite) return setNotice({ tone: "error", text: "Su rol no permite modificar lotes." });
+    const v = validate(batchSchema, form);
+    if (!v.ok) return setErrors(v.errors);
+    const a = actor();
+    const rate = checkWriteRate(a.uid);
+    if (!rate.allowed) return setNotice({ tone: "error", text: `Demasiadas operaciones seguidas. Reintente en ${formatRetry(rate.retryAfterMs)}.` });
+    setBusy(true);
+    try {
+      await setDoc(doc(db, "batches", v.data.code), { ...v.data, updatedBy: a.uid, updatedAt: serverTimestamp() });
+      writeAudit({ actor: a, type: "batch_save", target: v.data.code, details: { pond: v.data.pondId, poblacion: v.data.population, pesoG: v.data.avgWeightG } });
+      setNotice({ tone: "success", text: `Lote ${v.data.code} guardado correctamente.` });
+    } catch (err) {
+      setNotice({ tone: "error", text: friendlyError(err) });
+    } finally {
+      setBusy(false);
+    }
   }
 
+  async function remove() {
+    setBusy(true);
+    try {
+      await deleteDoc(doc(db, "batches", toDelete.id));
+      writeAudit({ actor: actor(), type: "batch_delete", target: toDelete.code, severity: "warning", details: { pond: toDelete.pondId } });
+      setNotice({ tone: "success", text: `Lote ${toDelete.code} eliminado.` });
+    } catch (err) {
+      setNotice({ tone: "error", text: friendlyError(err) });
+    } finally {
+      setBusy(false);
+      setToDelete(null);
+    }
+  }
+
+  const load = (b) => { setForm({ ...BLANK, ...b }); setErrors({}); window.scrollTo({ top: 0, behavior: "smooth" }); };
+
   return (
-    <AppLayout active="animales" searchPlaceholder="Buscar por tag RFID, especie o ID de lote...">
-      {/* Breadcrumb + Título */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-surface-container-high">
-        <div>
-          <div className="flex items-center gap-2 text-secondary text-label-sm font-label-sm mb-1">
-            <span>Bio-Gestión</span>
-            <span className="material-symbols-outlined text-[14px]">chevron_right</span>
-            <span className="text-primary font-semibold">Expedientes Biológicos</span>
-          </div>
-          <h1 className="text-headline-lg font-headline-lg text-on-surface tracking-tight">
-            Registro y Expediente Nutricional de Animales
-          </h1>
-          <p className="text-body-sm font-body-sm text-secondary mt-0.5">
-            Control individual y por lote con enlace a servomotores y dosificadores automáticos.
-          </p>
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <button className="inline-flex items-center gap-2 border border-outline-variant bg-surface-container-lowest text-on-surface text-label-md font-label-md px-3.5 py-2 rounded hover:bg-surface-container transition-colors shadow-sm">
-            <span className="material-symbols-outlined">file_download</span>
-            Exportar CSV / HL7
-          </button>
-          <button className="inline-flex items-center gap-2 bg-primary text-on-primary text-label-md font-label-md px-4 py-2 rounded hover:bg-[#0A484E] active:bg-[#073539] transition-all shadow-sm active:scale-95">
-            <span className="material-symbols-outlined text-[18px]">add</span>
-            + Registrar Nuevo Espécimen / Lote
-          </button>
-        </div>
-      </div>
+    <AppLayout active="animales" searchPlaceholder="Buscar en el historial…">
+      <PageHeader
+        eyebrow={<><span>Bio-Gestión › Lotes de peces</span><DemoBadge show={isDemo} /></>}
+        title="Registro y Ficha Nutricional de Lotes"
+        subtitle="Población, biomasa y etapa de crecimiento con cálculo automático de la tasa de alimentación."
+      />
+      {notice && <Banner tone={notice.tone}>{notice.text}</Banner>}
+      {error && <Banner tone="warn">{error}</Banner>}
 
-      {/* Toolbar de filtros */}
-      <div className="bg-surface-container-lowest border border-outline-variant/60 rounded-xl p-4 shadow-sm space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-center">
-          <div className="lg:col-span-1 relative">
-            <span className="material-symbols-outlined absolute left-2.5 top-2.5 text-secondary text-[18px]">search</span>
-            <input
-              className="w-full pl-8 pr-3 py-1.5 h-10 bg-surface-container-low border border-outline-variant rounded text-body-sm font-body-sm text-on-surface form-focus-ring"
-              placeholder="Filtrar por ID..."
-              type="text"
-            />
-          </div>
-          <div>
-            <label className="block text-label-sm font-label-sm text-secondary mb-1">Hábitat</label>
-            <select className="w-full h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded text-body-sm font-body-sm text-on-surface form-focus-ring">
-              <option>Todos (Acuático &amp; Terrestre)</option>
-              <option>Acuático: Agua Dulce</option>
-              <option>Acuático: Marino</option>
-              <option>Terrestre: Zona Cálida</option>
-              <option>Terrestre: Modular</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-label-sm font-label-sm text-secondary mb-1">Especie / Taxón</label>
-            <select className="w-full h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded text-body-sm font-body-sm text-on-surface form-focus-ring">
-              <option>Todas las especies</option>
-              <option>Oncorhynchus mykiss (Trucha)</option>
-              <option>Zalophus californianus (Lobo M.)</option>
-              <option>Cervus elaphus (Ciervo)</option>
-              <option>Litopenaeus vannamei (Camarón)</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-label-sm font-label-sm text-secondary mb-1">Régimen Dieta</label>
-            <select className="w-full h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded text-body-sm font-body-sm text-on-surface form-focus-ring">
-              <option>Cualquier régimen</option>
-              <option>Pellet flotante 4mm</option>
-              <option>Biomasa húmeda controlada</option>
-              <option>Heno enriquecido con calcio</option>
-              <option>Gránulos micro-extruidos 1.2mm</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-label-sm font-label-sm text-secondary mb-1">Estado de Salud</label>
-            <select className="w-full h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded text-body-sm font-body-sm text-on-surface form-focus-ring">
-              <option>Todos los estados</option>
-              <option>Óptimo / En Crecimiento</option>
-              <option>En Cuarentena / Observación</option>
-              <option>Ajuste Metabólico Requerido</option>
-            </select>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-surface-container text-label-sm font-label-sm text-secondary">
-          <div className="flex items-center gap-4">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#065F46]"></span> 128 Lotes Activos
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#D97706] animate-pulse"></span> 42 Dispensaciones Programadas Hoy
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-error"></span> 2 Restricciones Veterinarias
-            </span>
-          </div>
-          <div className="text-secondary">
-            Última sincronización telemetría: <span className="font-semibold text-on-surface">hace 3 min</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Workspace: Formulario + Ficha */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Columna izquierda: formulario */}
-        <section className="lg:col-span-7 bg-surface-container-lowest border border-outline-variant/70 rounded-xl p-6 shadow-sm space-y-6">
+        <Card className="lg:col-span-7 p-6 space-y-5" aria-labelledby="h-form">
           <div className="flex items-center justify-between pb-3 border-b border-surface-container-high">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-primary">edit_note</span>
-              <h2 className="text-headline-sm font-headline-sm text-on-surface">Formulario de Alta Bio-Nutricional</h2>
-            </div>
-            <span className="bg-secondary-container text-on-secondary-fixed text-label-sm font-label-sm px-2.5 py-0.5 rounded-full font-medium">
-              Nuevo Registro
-            </span>
+            <h2 id="h-form" className="text-headline-sm font-headline-sm text-on-surface flex items-center gap-2"><span className="material-symbols-outlined text-primary" aria-hidden="true">edit_note</span>Formulario de lote</h2>
+            {!canWrite && <span className="text-label-sm font-label-sm text-secondary">Solo lectura</span>}
           </div>
+          <form onSubmit={save} className="space-y-5" noValidate>
+            <fieldset disabled={!canWrite || busy} className="space-y-5 min-w-0">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Código de lote" htmlFor="b-code" error={errors.code} hint="Ej.: TRT-2024-098" required><input id="b-code" className={`${inputCls} font-mono uppercase`} maxLength={24} value={form.code} onChange={(e) => set("code", e.target.value)} /></Field>
+                <Field label="Nombre" htmlFor="b-name" error={errors.name} required><input id="b-name" className={inputCls} maxLength={80} value={form.name} onChange={(e) => set("name", e.target.value)} /></Field>
+                <Field label="Especie" htmlFor="b-species" error={errors.species} required><input id="b-species" className={`${inputCls} italic`} maxLength={80} value={form.species} onChange={(e) => set("species", e.target.value)} placeholder="Oncorhynchus mykiss" /></Field>
+                <Field label="Estanque" htmlFor="b-pond" error={errors.pondId}><select id="b-pond" className={inputCls} value={form.pondId} onChange={(e) => set("pondId", e.target.value)}>{PONDS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+                <Field label="Etapa biológica" htmlFor="b-stage" error={errors.stage}><select id="b-stage" className={inputCls} value={form.stage} onChange={(e) => set("stage", e.target.value)}>{BATCH_STAGES.map((s) => <option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></Field>
+                <Field label="Alimento" htmlFor="b-feed" error={errors.feedType}><select id="b-feed" className={inputCls} value={form.feedType} onChange={(e) => set("feedType", e.target.value)}>{FEED_TYPES.map((f) => <option key={f} value={f}>{FEED_LABELS[f]}</option>)}</select></Field>
+              </div>
 
-          <form className="space-y-5" onSubmit={handleSubmit}>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-label-md font-label-md text-on-surface mb-1.5">
-                  Código / Tag RFID <span className="text-error">*</span>
-                </label>
-                <div className="relative">
-                  <span className="material-symbols-outlined absolute left-3 top-2.5 text-secondary text-[18px]">nfc</span>
-                  <input
-                    className="w-full pl-9 pr-3 h-10 border border-outline-variant rounded bg-surface-container-lowest text-on-surface font-body-md text-body-md font-mono form-focus-ring"
-                    placeholder="ej. TRT-2024-098"
-                    type="text"
-                    defaultValue="TRT-2024-098"
-                  />
-                </div>
-                <span className="text-label-sm font-label-sm text-secondary mt-1 block">
-                  Frecuencia 134.2 kHz compatible ISO 11784
-                </span>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <Field label="Población (ejemplares)" error={errors.population} required><NumberStepper ariaLabel="Población" editable value={form.population} onChange={(v) => set("population", v)} min={1} max={1_000_000} step={100} /></Field>
+                <Field label="Peso promedio (g)" error={errors.avgWeightG} required><NumberStepper ariaLabel="Peso promedio en gramos" editable value={form.avgWeightG} onChange={(v) => set("avgWeightG", v)} min={0.1} max={50000} step={5} decimals={1} /></Field>
+                <Field label="Temperatura agua (°C)" error={errors.waterTempC}><NumberStepper ariaLabel="Temperatura del agua" editable value={form.waterTempC} onChange={(v) => set("waterTempC", v)} min={0} max={40} step={0.5} decimals={1} /></Field>
               </div>
-              <div>
-                <label className="block text-label-md font-label-md text-on-surface mb-1.5">
-                  Nombre Común / Identificador <span className="text-error">*</span>
-                </label>
-                <input
-                  className="w-full px-3 h-10 border border-outline-variant rounded bg-surface-container-lowest text-on-surface font-body-md text-body-md form-focus-ring"
-                  placeholder="ej. Lobo Marino 'Kibo' / Ciervo 'Atlas'"
-                  type="text"
-                  defaultValue="Lote Trucha Arcoíris L-4"
-                />
-                <span className="text-label-sm font-label-sm text-secondary mt-1 block">
-                  Nombre clínico o denominación del estanque
-                </span>
-              </div>
-            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-label-md font-label-md text-on-surface mb-1.5">Clasificación Taxonómica</label>
-                <input
-                  className="w-full px-3 h-10 border border-outline-variant rounded bg-surface-container-lowest text-on-surface italic font-body-md text-body-md form-focus-ring"
-                  placeholder="ej. Zalophus californianus"
-                  type="text"
-                  defaultValue="Oncorhynchus mykiss"
-                />
+              <div className="flex flex-wrap gap-x-8 gap-y-3">
+                <ToggleSwitch label="Auto-alimentación activa" checked={form.autoFeeding} onChange={(v) => set("autoFeeding", v)} />
+                <ToggleSwitch label="En cuarentena / observación" checked={form.quarantine} onChange={(v) => set("quarantine", v)} />
               </div>
-              <div>
-                <label className="block text-label-md font-label-md text-on-surface mb-1.5">
-                  Categoría de Hábitat <span className="text-error">*</span>
-                </label>
-                <select className="w-full h-10 px-3 border border-outline-variant rounded bg-surface-container-lowest text-on-surface font-body-md text-body-md form-focus-ring">
-                  <option value="ac-dulce">Acuático: Agua Dulce (Estanques / Raceway)</option>
-                  <option value="ac-marina">Acuático: Marina (Jaulas Costeras)</option>
-                  <option value="ter-herbi">Terrestre: Herbívoro (Rumiantes)</option>
-                  <option value="ter-carni">Terrestre: Carnívoro</option>
-                  <option value="ter-omni">Terrestre: Omnívoro</option>
-                </select>
-              </div>
-            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-label-md font-label-md text-on-surface mb-1.5">
-                  Peso Corporal Actual (o biomasa media)
-                </label>
-                <div className="flex">
-                  <input
-                    className="w-full px-3 h-10 border border-r-0 border-outline-variant rounded-l bg-surface-container-lowest text-on-surface font-body-md text-body-md form-focus-ring"
-                    step="0.01"
-                    type="number"
-                    defaultValue="1.45"
-                  />
-                  <span className="inline-flex items-center px-3 border border-outline-variant bg-surface-container-low text-secondary text-label-md font-label-md rounded-r">
-                    kg
-                  </span>
-                </div>
-              </div>
-              <div>
-                <label className="block text-label-md font-label-md text-on-surface mb-1.5">
-                  Etapa Biológica / Estado Vital
-                </label>
-                <select className="w-full h-10 px-3 border border-outline-variant rounded bg-surface-container-lowest text-on-surface font-body-md text-body-md form-focus-ring">
-                  <option>Crecimiento Acelerado (Engorde F2)</option>
-                  <option>Mantenimiento Adulto</option>
-                  <option>Gestación / Maduración Gametos</option>
-                  <option>Alevinaje / Destete Temprano</option>
-                  <option>Convalecencia Pos-tratamiento</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-label-md font-label-md text-on-surface">Dispensador IoT Asignado</label>
-              <div className="relative">
-                <span className="material-symbols-outlined absolute left-3 top-2.5 text-primary text-[18px]">precision_manufacturing</span>
-                <select className="w-full pl-9 pr-3 h-10 border border-outline-variant rounded bg-surface-container-lowest text-on-surface font-body-md text-body-md form-focus-ring">
-                  <option>ALIM-IOT-04 • Módulo Acuícola Flotante (Tolva Norte 350L - 94% tolva)</option>
-                  <option>ALIM-IOT-02 • Dosificador de Tornillo Sin-Fin Estanque B (65% tolva)</option>
-                  <option>ALIM-IOT-09 • Estación Neumática Recinto Ciervos (82% tolva)</option>
-                  <option>ALIM-IOT-11 • Muelle Alimentador Marino Canal Este (18% tolva - Alerta)</option>
-                </select>
-              </div>
-              <div className="flex items-center gap-2 mt-1">
-                <span className="inline-block w-2 h-2 rounded-full bg-[#065F46]"></span>
-                <span className="text-label-sm font-label-sm text-[#065F46] font-medium">
-                  Dispositivo en línea, latencia 42ms con sensor de flujo activo
-                </span>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-label-md font-label-md text-on-surface mb-1.5">
-                Tipo de Alimento Requerido &amp; Textura
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {FOOD_TYPES.map((food) => {
-                  const active = foodType === food.id;
-                  return (
-                    <label
-                      key={food.id}
-                      className={`flex items-center gap-3 p-2.5 border rounded cursor-pointer hover:bg-surface-container-low transition-colors ${
-                        active ? "bg-secondary-container/20 border-primary" : "border-outline-variant"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="food_type"
-                        checked={active}
-                        onChange={() => setFoodType(food.id)}
-                        className="text-primary focus:ring-primary h-4 w-4"
-                      />
-                      <div>
-                        <span className="block text-label-md font-label-md text-on-surface">{food.label}</span>
-                        <span className="block text-label-sm font-label-sm text-secondary">{food.detail}</span>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-label-md font-label-md text-on-surface mb-1.5">
-                Notas Veterinarias y Restricciones Nutricionales
-              </label>
-              <textarea
-                className="w-full p-3 border border-outline-variant rounded bg-surface-container-lowest text-on-surface font-body-md text-body-md form-focus-ring"
-                placeholder="Indique contraindicaciones, alergias, períodos de ayuno previo a muestreo o dosificación de inmunoestimulantes..."
-                rows={3}
-                defaultValue="Mantener saturación de oxígeno disuelto > 6.5 mg/L antes de la ración matutina. Suspender ración de las 18:00 hrs si la temperatura del agua supera los 17.5°C para evitar estrés digestivo."
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-3 pt-3 border-t border-surface-container-high">
-              <span className={`text-label-sm font-label-sm text-success transition-opacity ${guardado ? "opacity-100" : "opacity-0"}`}>
-                Registro guardado y vinculado a la telemetría.
-              </span>
-              <div className="flex items-center gap-3">
-                <button className="px-4 py-2 border border-outline text-secondary hover:text-on-surface rounded text-label-md font-label-md transition-colors" type="reset">
-                  Restablecer
-                </button>
-                <button
-                  className="px-5 py-2 bg-primary text-on-primary rounded text-label-md font-label-md hover:bg-[#0A484E] active:bg-[#073539] transition-all shadow-sm"
-                  type="submit"
-                >
-                  Guardar y Vincular Telemetría
-                </button>
-              </div>
+              <Field label="Notas veterinarias y restricciones" htmlFor="b-notes" error={errors.notes} hint={`${form.notes.length}/500`}>
+                <textarea id="b-notes" rows={3} maxLength={500} className="w-full p-3 border border-outline-variant rounded text-sm focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none" value={form.notes} onChange={(e) => set("notes", e.target.value)} />
+              </Field>
+            </fieldset>
+            <div className="flex justify-end gap-3 pt-3 border-t border-surface-container-high">
+              <button type="button" className={btnOutline} onClick={() => { setForm(BLANK); setErrors({}); }}>Restablecer</button>
+              <button type="submit" className={btnPrimary} disabled={!canWrite || busy}>{busy ? "Guardando…" : "Guardar lote"}</button>
             </div>
           </form>
-        </section>
+        </Card>
 
-        {/* Columna derecha: ficha nutricional + protocolos */}
-        <section className="lg:col-span-5 space-y-6">
-          <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-5 shadow-sm space-y-5 relative">
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-label-sm font-label-sm text-secondary uppercase tracking-wider font-semibold">Ficha Activa</span>
-                  <span className="px-2 py-0.5 rounded text-label-sm font-label-sm font-medium bg-[#ECFDF5] text-[#065F46] border border-[#A7F3D0]">
-                    Normal Operation
-                  </span>
-                </div>
-                <h3 className="text-headline-md font-headline-md text-on-surface mt-1">Lote Trucha Arcoíris L-4</h3>
-                <p className="text-body-sm font-body-sm text-secondary italic font-serif">
-                  Oncorhynchus mykiss • RFID: TRT-2024-098
-                </p>
-              </div>
-              <div className="w-12 h-12 rounded-lg bg-surface-container-low border border-outline-variant flex items-center justify-center text-primary">
-                <span className="material-symbols-outlined text-2xl">water_drop</span>
-              </div>
+        <section className="lg:col-span-5 space-y-6" aria-label="Ficha y cálculo">
+          <Card className="p-5 space-y-4">
+            <div>
+              <span className="text-label-sm font-label-sm text-secondary uppercase tracking-wider font-semibold">Ficha activa</span>
+              <h3 className="text-headline-md font-headline-md text-on-surface">{form.name || "Lote sin nombre"}</h3>
+              <p className="text-body-sm text-secondary italic">{form.species || "Especie sin definir"} • {form.code || "SIN-CÓDIGO"} • {pondName(form.pondId)}</p>
             </div>
-
-            <div className="relative rounded-lg overflow-hidden border border-outline-variant h-36 bg-surface-container">
-              <img
-                alt="Estanque de Trucha Arcoíris L-4"
-                className="w-full h-full object-cover"
-                src="https://lh3.googleusercontent.com/aida-public/AB6AXuDIwHdp2oCmZ_BO2--_d8awF0QsV5x5pFUOQ89wzYlzGBcyOSgMT9mhijhlM5HhxO7Vqbxo9wKPnVSuFneQfp0QrE3TyOq9F8nOP1g592_EDQ8W88IERVk53U7TGlMGyIa2ajnVUBWjc4Fi7Q2G3WtJTxcDxwHF1u3EiV2250rwtT73wVnVqxdFXIQIjLCqDk61RN-U5khAj8nuztxegJ3_LHgc1WYxpTcbQ76kk-l9eAk0vgyzze9tDA"
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent flex items-end p-3">
-                <div className="text-white text-label-sm font-label-sm flex items-center justify-between w-full">
-                  <span>Estanque Raceway #04 • Sector Acuícola</span>
-                  <span className="bg-primary/80 px-2 py-0.5 rounded text-[11px] backdrop-blur-sm">Cámara HD Sensor Activo</span>
-                </div>
+            <div className="bg-surface-container-low rounded-lg p-4 border border-outline-variant/60 space-y-3" aria-live="polite">
+              <div className="text-label-md font-label-md font-semibold text-on-surface">Tasa de alimentación recomendada</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-surface-container-lowest p-3 rounded border border-outline-variant/40"><span className="block text-label-sm text-secondary">Biomasa total</span><span className="text-data-metric font-data-metric text-primary">{calc.biomassKg.toFixed(0)}</span> <span className="text-label-md text-secondary">kg</span></div>
+                <div className="bg-surface-container-lowest p-3 rounded border border-outline-variant/40"><span className="block text-label-sm text-secondary">Tasa diaria</span><span className="text-data-metric font-data-metric text-on-surface">{calc.rate.toFixed(2)}</span> <span className="text-label-md text-secondary">% biomasa</span></div>
+                <div className="bg-surface-container-lowest p-3 rounded border border-outline-variant/40"><span className="block text-label-sm text-secondary">Ración diaria</span><span className="text-data-metric font-data-metric text-primary">{calc.dailyKg.toFixed(1)}</span> <span className="text-label-md text-secondary">kg/día</span></div>
+                <div className="bg-surface-container-lowest p-3 rounded border border-outline-variant/40"><span className="block text-label-sm text-secondary">Frecuencia</span><span className="text-data-metric font-data-metric text-on-surface">{calc.doses}</span> <span className="text-label-md text-secondary">dosis · {calc.perDose.toFixed(2)} kg</span></div>
               </div>
+              <p className="text-label-sm font-label-sm text-secondary">Calculada por peso medio y temperatura del agua. Referencia orientativa: valide con el veterinario responsable.</p>
             </div>
-
-            <div className="bg-surface-container-low rounded-lg p-4 border border-outline-variant/60 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-label-md font-label-md text-on-surface font-semibold">Cálculo de Ingesta Diaria Automática</span>
-                <span className="material-symbols-outlined text-secondary text-sm">calculate</span>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-surface-container-lowest p-3 rounded border border-outline-variant/40">
-                  <span className="block text-label-sm font-label-sm text-secondary">Ración Total Diaria</span>
-                  <div className="flex items-baseline gap-1 mt-1">
-                    <span className="text-data-metric font-data-metric text-primary">18.4</span>
-                    <span className="text-label-md font-label-md text-secondary">kg/día</span>
-                  </div>
-                  <span className="text-[11px] text-secondary">~1.27% peso biomasa</span>
-                </div>
-                <div className="bg-surface-container-lowest p-3 rounded border border-outline-variant/40">
-                  <span className="block text-label-sm font-label-sm text-secondary">Frecuencia / Pulsos</span>
-                  <div className="flex items-baseline gap-1 mt-1">
-                    <span className="text-data-metric font-data-metric text-on-surface">6</span>
-                    <span className="text-label-md font-label-md text-secondary">dosis/día</span>
-                  </div>
-                  <span className="text-[11px] text-secondary">3.06 kg por ciclo</span>
-                </div>
-              </div>
-              <div className="space-y-1 pt-1">
-                <div className="flex justify-between text-label-sm font-label-sm">
-                  <span className="text-secondary">Nivel de Tolva (ALIM-IOT-04)</span>
-                  <span className="font-semibold text-primary">94% (329 kg restantes)</span>
-                </div>
-                <div className="w-full h-1.5 bg-surface-container-high rounded-full overflow-hidden">
-                  <div className="h-full bg-primary rounded-full" style={{ width: "94%" }}></div>
-                </div>
-              </div>
+            <div>
+              <h4 className="text-label-lg font-label-lg text-on-surface">Proyección de crecimiento (modelo, 12 semanas)</h4>
+              <LineChart ariaLabel="Proyección de peso medio en gramos por semana" labels={calc.weeks.map((w) => `S${w}`)} yFormat={(v) => v.toFixed(0)} height={180} series={[{ name: "Peso proyectado", color: "#004349", values: calc.curve, fmt: (v) => `${v.toFixed(0)} g` }]} />
+              <p className="text-label-sm text-secondary">SGR estimado: {calc.sgr.toFixed(2)} %/día</p>
             </div>
-
-            <div className="space-y-3 pt-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="text-label-lg font-label-lg text-on-surface">Curva de Ganancia Ponderal (g)</h4>
-                  <p className="text-label-sm font-label-sm text-secondary">Real vs. Modelo Von Bertalanffy</p>
-                </div>
-                <div className="flex items-center gap-3 text-label-sm font-label-sm">
-                  <span className="flex items-center gap-1">
-                    <span className="w-2.5 h-1 bg-primary rounded-full"></span> Real
-                  </span>
-                  <span className="flex items-center gap-1 text-secondary">
-                    <span className="w-2.5 h-1 bg-outline-variant rounded-full"></span> Proyectado
-                  </span>
-                </div>
-              </div>
-              <div className="w-full h-40 bg-surface-container-low rounded-lg p-2 border border-outline-variant/50 relative flex items-end">
-                <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 320 120">
-                  <line stroke="#CBD5E1" strokeDasharray="3 3" strokeWidth="1" x1="0" x2="320" y1="30" y2="30"></line>
-                  <line stroke="#CBD5E1" strokeDasharray="3 3" strokeWidth="1" x1="0" x2="320" y1="60" y2="60"></line>
-                  <line stroke="#CBD5E1" strokeDasharray="3 3" strokeWidth="1" x1="0" x2="320" y1="90" y2="90"></line>
-                  <path d="M 10 105 Q 80 85 160 55 T 310 18" fill="none" stroke="#94A3B8" strokeDasharray="4 4" strokeWidth="2"></path>
-                  <defs>
-                    <linearGradient id="curveGradient" x1="0%" x2="0%" y1="0%" y2="100%">
-                      <stop offset="0%" stopColor="#004349" stopOpacity="0.25"></stop>
-                      <stop offset="100%" stopColor="#004349" stopOpacity="0.0"></stop>
-                    </linearGradient>
-                  </defs>
-                  <path d="M 10 105 L 60 92 L 120 78 L 180 52 L 240 38 L 290 22 L 290 115 L 10 115 Z" fill="url(#curveGradient)"></path>
-                  <path d="M 10 105 L 60 92 L 120 78 L 180 52 L 240 38 L 290 22" fill="none" stroke="#004349" strokeWidth="2.5"></path>
-                  <circle cx="10" cy="105" fill="#004349" r="3"></circle>
-                  <circle cx="60" cy="92" fill="#004349" r="3"></circle>
-                  <circle cx="120" cy="78" fill="#004349" r="3"></circle>
-                  <circle cx="180" cy="52" fill="#004349" r="3"></circle>
-                  <circle cx="240" cy="38" fill="#004349" r="3"></circle>
-                  <circle className="animate-ping origin-center" cx="290" cy="22" fill="#004349" opacity="0.4" r="4"></circle>
-                  <circle cx="290" cy="22" fill="#004349" r="4"></circle>
-                </svg>
-                <div className="absolute bottom-1 inset-x-3 flex justify-between text-[10px] text-secondary font-mono">
-                  <span>Sem 01</span>
-                  <span>Sem 04</span>
-                  <span>Sem 08</span>
-                  <span>Sem 12 (Hoy)</span>
-                </div>
-              </div>
-              <div className="grid grid-cols-3 gap-2 pt-1 text-center">
-                <div className="bg-surface-container-low p-2 rounded">
-                  <span className="block text-[11px] text-secondary">FCR Acumulado</span>
-                  <span className="font-bold text-on-surface text-body-md font-mono">1.12</span>
-                </div>
-                <div className="bg-surface-container-low p-2 rounded">
-                  <span className="block text-[11px] text-secondary">SGR (%/día)</span>
-                  <span className="font-bold text-primary text-body-md font-mono">+1.84%</span>
-                </div>
-                <div className="bg-surface-container-low p-2 rounded">
-                  <span className="block text-[11px] text-secondary">Supervivencia</span>
-                  <span className="font-bold text-[#065F46] text-body-md font-mono">98.6%</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="p-3 bg-secondary-container/30 border border-secondary-container rounded-lg flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <span className="material-symbols-outlined text-primary">bolt</span>
-                <div>
-                  <span className="block text-label-md font-label-md text-on-surface">Dispensación Manual Inmediata</span>
-                  <span className="block text-label-sm font-label-sm text-secondary">Pulso de prueba 250g vía IoT</span>
-                </div>
-              </div>
-              <button className="px-3 py-1.5 bg-[#0D5C63] text-white hover:bg-[#0A484E] active:bg-[#073539] text-label-sm font-label-sm rounded transition-all shadow-sm">
-                Dispensar Ahora
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-5 shadow-sm space-y-3">
-            <div className="flex items-center justify-between">
-              <h4 className="text-label-lg font-label-lg text-on-surface flex items-center gap-2">
-                <span className="material-symbols-outlined text-secondary text-base">medical_services</span>
-                Protocolos Veterinarios Activos
-              </h4>
-              <span className="text-label-sm font-label-sm text-secondary">Dr. R. Arispe (M.V.)</span>
-            </div>
-            <ul className="divide-y divide-surface-container text-body-sm font-body-sm">
-              {VET_PROTOCOLS.map((p) => (
-                <li key={p.title} className="py-2 flex items-start gap-2.5">
-                  <span className={`material-symbols-outlined text-sm mt-0.5 ${p.iconColor}`}>{p.icon}</span>
-                  <div>
-                    <span className="font-semibold text-on-surface">{p.title}</span> <span className="text-secondary">{p.detail}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
+          </Card>
         </section>
       </div>
+
+      <Card className="p-5" aria-labelledby="h-list">
+        <h2 id="h-list" className="text-headline-sm font-headline-sm text-on-surface mb-3">Lotes registrados</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-body-sm">
+            <thead><tr className="text-secondary text-label-sm uppercase tracking-wider border-b border-surface-container"><th className="py-2 pr-3">Código</th><th className="pr-3">Nombre</th><th className="pr-3">Estanque</th><th className="pr-3 text-right">Población</th><th className="pr-3 text-right">Peso medio</th><th className="pr-3">Estado</th><th></th></tr></thead>
+            <tbody className="divide-y divide-surface-container">
+              {items.map((b) => (
+                <tr key={b.id}>
+                  <td className="py-2 pr-3 font-mono">{b.code}</td><td className="pr-3">{b.name}</td><td className="pr-3">{b.pondId}</td>
+                  <td className="pr-3 text-right font-mono">{b.population?.toLocaleString("es")}</td><td className="pr-3 text-right font-mono">{b.avgWeightG} g</td>
+                  <td className="pr-3">{b.quarantine ? <span className="text-amber-700 font-semibold">Cuarentena</span> : "Normal"}</td>
+                  <td className="text-right whitespace-nowrap">
+                    <button className="text-primary font-semibold hover:underline mr-3" onClick={() => load(b)}>Cargar</button>
+                    {can("animals:delete") && !b._demo && <button className="text-error font-semibold hover:underline" onClick={() => setToDelete(b)}>Eliminar</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <ConfirmDialog open={!!toDelete} danger busy={busy} title="Eliminar lote" message={`Se eliminará el lote ${toDelete?.code} de forma permanente.`} confirmLabel="Eliminar" onConfirm={remove} onCancel={() => setToDelete(null)} />
     </AppLayout>
   );
 }

@@ -1,0 +1,186 @@
+rules_version = '2';
+
+// AlimentaTec — Reglas de seguridad de Firestore (A01, A03, A04, A09).
+// Roles: admin · operador · auditor. El rol sale del custom claim `role`
+// (si existe) o del documento users/{uid}. DENEGAR por defecto.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------- helpers ---------- */
+    function signedIn() { return request.auth != null; }
+    function userDoc() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function hasProfile() { return exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
+    function role() {
+      return request.auth.token.get('role', null) != null ? request.auth.token.role : userDoc().role;
+    }
+    function active() { return signedIn() && hasProfile() && userDoc().get('disabled', false) == false; }
+    function isAdmin()    { return active() && role() == 'admin'; }
+    function isOperator() { return active() && role() in ['admin', 'operador']; }
+    function canRead()    { return active() && role() in ['admin', 'operador', 'auditor']; }
+
+    function str(v, lo, hi) { return v is string && v.size() >= lo && v.size() <= hi; }
+    function num(v, lo, hi) { return v is number && v >= lo && v <= hi; }
+    function pond(v)        { return v is string && v.matches('^[A-Z]{2}-[0-9]{2}$'); }
+
+    /* ---------- perfiles ---------- */
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      // Auto-provisión SOLO con mínimo privilegio (auditor). Nadie se auto-asigna otro rol.
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['uid','email','displayName','role','disabled','createdAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'auditor'
+        && request.resource.data.disabled == false
+        && request.resource.data.createdAt == request.time;
+      // El usuario solo puede cambiar su PIN; el admin gestiona rol/estado.
+      allow update: if isAdmin()
+        || (signedIn() && request.auth.uid == uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pinSalt','pinHash','pinIter'])
+            && str(request.resource.data.pinHash, 20, 100) && str(request.resource.data.pinSalt, 10, 64));
+      allow delete: if false;
+    }
+
+    /* ---------- dispositivos IoT ---------- */
+    function validDevice(d) {
+      return d.keys().hasOnly(['serial','name','type','pondId','protocol','firmware','status','credentialHash','credentialAlgo','clientId','username','createdBy','createdAt'])
+        && d.serial.matches('^[A-Z0-9]{2,6}(-[A-Z0-9]{2,12}){1,3}$')
+        && str(d.name, 2, 60)
+        && d.type in ['tolva','sensor']
+        && pond(d.pondId)
+        && d.protocol in ['LoRaWAN','WiFi','4G']
+        && d.firmware.matches('^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{1,3}$')
+        && d.status == 'offline'
+        && str(d.credentialHash, 64, 64)
+        && d.createdBy == request.auth.uid
+        && d.createdAt == request.time;
+    }
+    match /devices/{id} {
+      allow read: if canRead();
+      allow create: if isAdmin() && id == request.resource.data.serial && validDevice(request.resource.data);
+      // Solo el admin revoca; la revocación invalida las credenciales.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','credentialHash','revokedAt','revokedBy','name','pondId','firmware']);
+      allow delete: if isAdmin() && resource.data.status == 'revoked';
+    }
+
+    /* ---------- lotes de peces (sin negativos ni desbordes) ---------- */
+    function validBatch(d) {
+      return d.keys().hasOnly(['code','name','species','pondId','stage','population','avgWeightG','waterTempC','feedType','autoFeeding','quarantine','notes','updatedBy','updatedAt'])
+        && d.code.matches('^[A-Z0-9-]{3,24}$')
+        && str(d.name, 2, 80) && str(d.species, 3, 80)
+        && pond(d.pondId)
+        && d.stage in ['alevinaje','crecimiento','engorde','adulto']
+        && d.population is int && num(d.population, 1, 1000000)
+        && num(d.avgWeightG, 0.1, 50000)
+        && num(d.waterTempC, 0, 40)
+        && d.feedType in ['pellet','biomasa','micro','gránulo']
+        && d.autoFeeding is bool && d.quarantine is bool
+        && str(d.notes, 0, 500)
+        && d.updatedBy == request.auth.uid && d.updatedAt == request.time;
+    }
+    match /batches/{id} {
+      allow read: if canRead();
+      allow create, update: if isOperator() && id == request.resource.data.code && validBatch(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    /* ---------- horarios ---------- */
+    function validSchedule(d) {
+      return d.keys().hasOnly(['name','pondId','time','days','mechanism','durationSec','doseKg','enabled','conditions','updatedBy','updatedAt'])
+        && str(d.name, 2, 60) && pond(d.pondId)
+        && d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && d.days is list && d.days.size() >= 1 && d.days.size() <= 7
+        && d.mechanism in ['compuerta','neumatica','acustica']
+        && d.durationSec is int && num(d.durationSec, 5, 180)
+        && num(d.doseKg, 0.1, 50)
+        && d.enabled is bool
+        && d.conditions is list && d.conditions.size() <= 5
+        && d.updatedBy == request.auth.uid && d.updatedAt == request.time;
+    }
+    match /schedules/{id} {
+      allow read: if canRead();
+      allow create: if isOperator() && validSchedule(request.resource.data);
+      allow update: if isOperator() && (validSchedule(request.resource.data)
+        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['enabled','updatedBy','updatedAt']));
+      allow delete: if isOperator();
+    }
+
+    /* ---------- dosificación ---------- */
+    match /dosingConfigs/{deviceId} {
+      allow read: if canRead();
+      allow create, update: if isOperator()
+        && request.resource.data.keys().hasOnly(['deviceId','portionG','mode','radiusM','hoppers','updatedBy','updatedAt'])
+        && request.resource.data.deviceId == deviceId
+        && num(request.resource.data.portionG, 50, 500)
+        && request.resource.data.mode in ['biomasa','fija']
+        && num(request.resource.data.radiusM, 1.5, 5)
+        && request.resource.data.hoppers is list && request.resource.data.hoppers.size() == 3
+        && request.resource.data.updatedBy == request.auth.uid && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    /* ---------- comandos a actuadores (A04) ---------- */
+    // NOTA: los límites de tasa autoritativos deben replicarse en el backend
+    // (Cloud Function / broker). Aquí se acotan tipo, tamaño y autoría.
+    match /commands/{id} {
+      allow read: if canRead();
+      allow create: if isOperator()
+        && request.resource.data.keys().hasOnly(['type','deviceId','pondId','amountG','rations','enabled','uid','status','ts'])
+        && request.resource.data.type in ['dispense_manual','dispense_test','toggle_auto','emergency_stop']
+        && request.resource.data.deviceId.matches('^(ALL|[A-Za-z0-9-]{3,32})$')
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.ts == request.time
+        && (!('amountG' in request.resource.data) || (request.resource.data.amountG is int && num(request.resource.data.amountG, 1, 5000)))
+        && (!('rations' in request.resource.data) || (request.resource.data.rations is int && num(request.resource.data.rations, 1, 20)));
+      allow update, delete: if false;
+    }
+
+    /* ---------- auditoría: APPEND-ONLY (A09) ---------- */
+    match /auditLogs/{id} {
+      allow read: if canRead();
+      allow create: if active()
+        && request.resource.data.keys().hasOnly(['type','severity','target','details','uid','email','role','sessionId','seq','prevHash','clientTs','hash','ts'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.role == role()
+        && request.resource.data.ts == request.time
+        && request.resource.data.severity in ['info','warning','critical']
+        && str(request.resource.data.type, 1, 40)
+        && request.resource.data.seq is int && request.resource.data.seq >= 1
+        && str(request.resource.data.hash, 64, 64);
+      allow update, delete: if false;   // inmutable para TODOS los roles
+    }
+
+    /* ---------- alertas ---------- */
+    match /alerts/{id} {
+      allow read: if canRead();
+      allow create: if isOperator()
+        && request.resource.data.keys().hasOnly(['severity','metric','value','pond','message','uid','ts'])
+        && request.resource.data.severity in ['info','warning','critical']
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.ts == request.time
+        && str(request.resource.data.message, 1, 200);
+      allow update, delete: if false;
+    }
+    match /securityAlerts/{id} {
+      allow read: if isAdmin();
+      allow create: if active()
+        && request.resource.data.keys().hasOnly(['kind','detail','uid','email','sessionId','acknowledged','ts'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.acknowledged == false
+        && request.resource.data.ts == request.time
+        && str(request.resource.data.kind, 1, 40) && str(request.resource.data.detail, 1, 300);
+      allow update: if isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['acknowledged']);
+      allow delete: if false;
+    }
+
+    /* ---------- métricas de producción (reportes) ---------- */
+    match /productionMetrics/{id} {
+      allow read: if canRead();
+      allow write: if isAdmin();
+    }
+
+    /* ---------- todo lo demás: denegado ---------- */
+    match /{document=**} { allow read, write: if false; }
+  }
+}

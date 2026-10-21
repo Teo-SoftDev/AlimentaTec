@@ -1,64 +1,134 @@
-import React from "react";
-import { Link, useNavigate } from "react-router-dom";
+import React, { useMemo } from "react";
+import { Link } from "react-router-dom";
+import AppLayout from "../components/AppLayout.jsx";
+import { Banner, Card, DemoBadge, KpiCard, PageHeader } from "../components/ui.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
+import { toDate, useCollection } from "../hooks/useCollection.js";
+import { DEMO_ALERTS, DEMO_BATCHES, DEMO_DEVICES } from "../utils/demoData.js";
+import { PONDS, pondName } from "../utils/constants.js";
+import { STATUS_STYLES, statusFor, worstStatus } from "../utils/thresholds.js";
+
+// Última lectura de referencia por estanque (la telemetría en vivo está en /monitoreo).
+const POND_READINGS = {
+  "AQ-01": { oxygen: 7.2, temperature: 12.8, ph: 7.5, turbidity: 1.6 },
+  "AQ-04": { oxygen: 7.8, temperature: 14.2, ph: 7.4, turbidity: 1.8 },
+  "AQ-06": { oxygen: 6.0, temperature: 24.1, ph: 7.9, turbidity: 3.4 },
+  "AQ-09": { oxygen: 5.0, temperature: 16.9, ph: 7.2, turbidity: 2.2 },
+};
+
+const feedRatePct = (g) => (g < 5 ? 6 : g < 20 ? 4 : g < 100 ? 2.8 : g < 300 ? 2 : 1.4);
 
 export default function Dashboard() {
-  const { user, cerrarSesion } = useAuth();
-  const navigate = useNavigate();
+  const { user, role, can } = useAuth();
+  const batches = useCollection("batches", { limitN: 200, fallback: DEMO_BATCHES });
+  const devices = useCollection("devices", { limitN: 200, fallback: DEMO_DEVICES });
+  const alerts = useCollection("alerts", { orderByField: "ts", direction: "desc", limitN: 20, fallback: DEMO_ALERTS });
+  const secAlerts = useCollection("securityAlerts", { orderByField: "ts", direction: "desc", limitN: 5, enabled: can("security:view") });
 
-  async function handleLogout() {
-    await cerrarSesion();
-    navigate("/");
-  }
+  const stats = useMemo(() => {
+    const biomass = batches.items.reduce((s, b) => s + ((b.population || 0) * (b.avgWeightG || 0)) / 1000, 0);
+    const dailyFeed = batches.items.reduce((s, b) => s + (((b.population || 0) * (b.avgWeightG || 0)) / 1000) * (feedRatePct(b.avgWeightG || 0) / 100), 0);
+    const tanks = PONDS.map((p) => {
+      const r = POND_READINGS[p.id];
+      return { ...p, readings: r, status: worstStatus(Object.entries(r).map(([m, v]) => statusFor(m, v))) };
+    });
+    const dev = devices.items.filter((d) => d.status !== "revoked");
+    return { biomass, dailyFeed, tanks, online: dev.filter((d) => d.status === "online").length, totalDev: dev.length };
+  }, [batches.items, devices.items]);
+
+  const critical = alerts.items.filter((a) => a.severity === "critical" || a.severity === "warning");
+  const okTanks = stats.tanks.filter((t) => t.status === "ok").length;
+  const loadError = batches.error || devices.error || alerts.error;
 
   return (
-    <div className="h-full flex flex-col min-h-screen">
-      <header className="w-full bg-surface-container-lowest border-b border-surface-container-high px-6 py-3 flex items-center justify-between shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="w-7 h-7 bg-primary rounded-lg flex items-center justify-center text-on-primary font-bold text-xs">
-            AT
-          </div>
-          <span className="text-lg text-primary font-bold tracking-tight">AlimentaTec</span>
-        </div>
-        <button
-          type="button"
-          onClick={handleLogout}
-          className="flex items-center gap-2 text-sm text-secondary hover:text-on-surface border border-outline-variant rounded px-3 py-1.5 transition-colors"
-        >
-          <span className="material-symbols-outlined text-lg">logout</span> Cerrar sesión
-        </button>
-      </header>
+    <AppLayout active="dashboard">
+      <PageHeader
+        eyebrow={<><span>Bienvenido/a, {user?.displayName || "operador"}</span><DemoBadge show={batches.isDemo || devices.isDemo} /></>}
+        title="Resumen Ejecutivo de la Granja Acuícola"
+        subtitle="Estado general de biomasa, consumo de alimento, estanques y dispositivos."
+      />
 
-      <main className="flex-1 flex items-center justify-center p-8">
-        <div className="max-w-md w-full bg-surface-container-lowest border border-surface-container-high rounded-xl shadow-sm p-8 text-center space-y-3">
-          <span className="material-symbols-outlined text-primary text-5xl">verified_user</span>
-          <h1 className="text-xl font-bold text-on-surface">Sesión iniciada correctamente</h1>
-          <p className="text-sm text-secondary">
-            Bienvenido/a, <strong>{user?.displayName || "Operador de Planta"}</strong>.
-          </p>
-          <p className="text-sm text-secondary">Correo: {user?.email}</p>
-          <p className="text-xs text-secondary pt-2">
-            Este es un panel de ejemplo. Aquí puede construir la vista de dosificación y actuadores.
-          </p>
+      {user && !user.emailVerified && <Banner tone="info" icon="mark_email_unread">Su correo aún no está verificado. Revise su bandeja de entrada para completar la verificación.</Banner>}
+      {loadError && <Banner tone="warn">{loadError}</Banner>}
 
-          <div className="grid grid-cols-2 gap-3 pt-2">
-            <Link
-              to="/dispositivos"
-              className="flex flex-col items-center gap-1.5 p-3 rounded-lg border border-outline-variant hover:bg-surface-container-low transition-colors"
-            >
-              <span className="material-symbols-outlined text-primary">precision_manufacturing</span>
-              <span className="text-sm font-semibold text-on-surface">Dispositivos</span>
-            </Link>
-            <Link
-              to="/animales"
-              className="flex flex-col items-center gap-1.5 p-3 rounded-lg border border-outline-variant hover:bg-surface-container-low transition-colors"
-            >
-              <span className="material-symbols-outlined text-primary">pets</span>
-              <span className="text-sm font-semibold text-on-surface">Animales</span>
-            </Link>
+      <section aria-label="Indicadores clave" className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <KpiCard label="Biomasa total" icon="set_meal" value={(stats.biomass / 1000).toFixed(1)} unit="toneladas" hint={`${batches.items.length} lote(s) activos`} barPct={70} />
+        <KpiCard label="Consumo diario de alimento" icon="scale" value={stats.dailyFeed.toFixed(0)} unit="kg/día" hint="Estimado por tasa de alimentación" barPct={62} barClass="bg-primary-container" />
+        <KpiCard label="Estado de estanques" icon="water" value={`${okTanks}/${stats.tanks.length}`} unit="óptimos" iconClass={okTanks === stats.tanks.length ? "text-primary" : "text-amber-600"} barPct={(okTanks / stats.tanks.length) * 100} barClass={okTanks === stats.tanks.length ? "bg-primary" : "bg-amber-500"} />
+        <KpiCard label="Dispositivos activos" icon="devices" value={`${stats.online}/${stats.totalDev}`} unit="en línea" barPct={stats.totalDev ? (stats.online / stats.totalDev) * 100 : 0} barClass="bg-primary-container" />
+      </section>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <Card className="lg:col-span-7 p-5" aria-labelledby="h-ponds">
+          <h2 id="h-ponds" className="text-headline-sm font-headline-sm text-on-surface mb-4">Estado por estanque</h2>
+          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {stats.tanks.map((t) => {
+              const st = STATUS_STYLES[t.status];
+              return (
+                <li key={t.id} className="border border-surface-container-high rounded-lg p-3 bg-surface">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-on-surface text-sm">{t.name}</span>
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-label-sm font-label-sm ${st.pill}`}>
+                      <span className="material-symbols-outlined text-[14px]" aria-hidden="true">{st.icon}</span>{st.label}
+                    </span>
+                  </div>
+                  <p className="text-label-sm font-label-sm text-secondary">{t.species}</p>
+                  <dl className="grid grid-cols-4 gap-1 mt-2 text-center">
+                    {[["O₂", t.readings.oxygen, "oxygen"], ["T°", t.readings.temperature, "temperature"], ["pH", t.readings.ph, "ph"], ["NTU", t.readings.turbidity, "turbidity"]].map(([l, v, m]) => (
+                      <div key={l}><dt className="text-[10px] text-secondary">{l}</dt><dd className={`font-mono text-xs font-bold ${STATUS_STYLES[statusFor(m, v)].text}`}>{v}</dd></div>
+                    ))}
+                  </dl>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="text-label-sm font-label-sm text-secondary mt-3">Lecturas de referencia. Telemetría firmada en vivo en <Link to="/monitoreo" className="text-primary font-semibold hover:underline">Monitoreo</Link>.</p>
+        </Card>
+
+        <Card className="lg:col-span-5 p-5" aria-labelledby="h-alerts">
+          <div className="flex items-center justify-between mb-4">
+            <h2 id="h-alerts" className="text-headline-sm font-headline-sm text-on-surface">Alertas en tiempo real</h2>
+            <DemoBadge show={alerts.isDemo} />
           </div>
+          <ul aria-live="polite" className="space-y-2">
+            {critical.length === 0 && <li className="text-sm text-secondary">Sin alertas activas. Todo en orden.</li>}
+            {critical.slice(0, 6).map((a) => (
+              <li key={a.id} className={`flex gap-2 p-2.5 rounded border text-sm ${a.severity === "critical" ? "border-red-200 bg-red-50/60" : "border-amber-200 bg-amber-50/60"}`}>
+                <span className={`material-symbols-outlined text-lg ${a.severity === "critical" ? "text-error" : "text-amber-600"}`} aria-hidden="true">{a.severity === "critical" ? "error" : "warning"}</span>
+                <div className="min-w-0">
+                  <div className="font-semibold text-on-surface">{a.pond ? `${pondName(a.pond)} · ` : ""}{a.message}</div>
+                  <div className="text-label-sm font-label-sm text-secondary">{toDate(a.ts)?.toLocaleString("es") || ""}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
+
+          {can("security:view") && (
+            <div className="mt-5 pt-4 border-t border-surface-container-high">
+              <h3 className="text-label-lg font-label-lg text-on-surface flex items-center gap-1.5"><span className="material-symbols-outlined text-error text-base" aria-hidden="true">gpp_maybe</span> Alertas de seguridad (admin)</h3>
+              <ul className="mt-2 space-y-1.5">
+                {secAlerts.items.length === 0 && <li className="text-sm text-secondary">Sin alertas de seguridad.</li>}
+                {secAlerts.items.map((s) => (
+                  <li key={s.id} className="text-sm p-2 rounded bg-red-50/60 border border-red-200"><strong>{s.kind}</strong>: {s.detail}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <Card className="p-5">
+        <h2 className="text-headline-sm font-headline-sm text-on-surface mb-3">Accesos rápidos</h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[["/monitoreo", "dashboard", "Monitoreo"], ["/dispositivos", "precision_manufacturing", "Dispositivos"], ["/horarios", "schedule", "Horarios"], ["/reportes", "assessment", "Reportes"]].map(([to, icon, label]) => (
+            <Link key={to} to={to} className="flex flex-col items-center gap-1.5 p-3 rounded-lg border border-outline-variant hover:bg-surface-container-low transition-colors">
+              <span className="material-symbols-outlined text-primary" aria-hidden="true">{icon}</span>
+              <span className="text-sm font-semibold text-on-surface">{label}</span>
+            </Link>
+          ))}
         </div>
-      </main>
-    </div>
+        <p className="text-label-sm font-label-sm text-secondary mt-3">Rol activo: <strong>{role}</strong></p>
+      </Card>
+    </AppLayout>
   );
 }

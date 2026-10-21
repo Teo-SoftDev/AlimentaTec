@@ -1,22 +1,27 @@
-// src/utils/authErrors.js
-// Traduce los códigos de error de Firebase Auth a mensajes en español.
+// src/utils/authErrors.js — Errores de Firebase Auth → mensajes en español.
+// A07: los fallos de credenciales usan UN solo mensaje genérico para no
+// revelar si el correo existe (evita enumeración de usuarios).
+const GENERIC_CREDENTIALS = "Correo o contraseña incorrectos.";
 
 const MENSAJES = {
   "auth/invalid-email": "El correo ingresado no tiene un formato válido.",
-  "auth/user-disabled": "Esta cuenta de operador ha sido deshabilitada. Contacte al administrador de planta.",
-  "auth/user-not-found": "No existe una cuenta de operador con ese correo.",
-  "auth/wrong-password": "La contraseña ingresada es incorrecta.",
-  "auth/invalid-credential": "Correo o contraseña incorrectos. Verifique sus credenciales.",
-  "auth/invalid-login-credentials": "Correo o contraseña incorrectos. Verifique sus credenciales.",
-  "auth/email-already-in-use": "Ya existe una cuenta registrada con ese correo institucional.",
-  "auth/weak-password": "La contraseña es demasiado débil. Use al menos 8 caracteres, combinando letras y números.",
-  "auth/too-many-requests": "Se han detectado demasiados intentos. Espere unos minutos antes de volver a intentar.",
-  "auth/network-request-failed": "No se pudo conectar con el servidor de autenticación. Verifique su red.",
-  "auth/operation-not-allowed": "El inicio de sesión con correo y contraseña no está habilitado en este proyecto. Contacte al administrador.",
-  "auth/missing-password": "Debe ingresar una contraseña.",
+  "auth/user-disabled": "Esta cuenta ha sido deshabilitada. Contacte al administrador.",
+  "auth/user-not-found": GENERIC_CREDENTIALS,
+  "auth/wrong-password": GENERIC_CREDENTIALS,
+  "auth/invalid-credential": GENERIC_CREDENTIALS,
+  "auth/invalid-login-credentials": GENERIC_CREDENTIALS,
+  "auth/email-already-in-use": "No fue posible crear la cuenta con esos datos.",
+  "auth/weak-password": "La contraseña no cumple la política de seguridad.",
+  "auth/too-many-requests": "Demasiados intentos. Espere unos minutos antes de reintentar.",
+  "auth/network-request-failed": "No se pudo conectar con el servidor. Verifique su red.",
+  "auth/operation-not-allowed": "El acceso con correo y contraseña no está habilitado. Contacte al administrador.",
+  "auth/requires-recent-login": "Por seguridad, vuelva a iniciar sesión para continuar.",
 };
 
+export const CREDENTIAL_ERROR_CODES = [
+  "auth/user-not-found", "auth/wrong-password", "auth/invalid-credential", "auth/invalid-login-credentials",
+];
+
 export function traducirErrorAuth(error) {
-  const codigo = error?.code || "";
-  return MENSAJES[codigo] || "Ocurrió un error inesperado. Intente nuevamente en unos momentos.";
+  return MENSAJES[error?.code] || "Ocurrió un error inesperado. Intente nuevamente en unos momentos.";
 }
