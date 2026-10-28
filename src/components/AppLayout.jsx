@@ -7,6 +7,7 @@ import { friendlyError } from "../utils/errors.js";
 import { sendCommand } from "../services/commands.js";
 import ConfirmDialog from "./ConfirmDialog.jsx";
 import { Banner } from "./ui.jsx";
+import { useSimulator } from "../simulator/SimulatorContext.jsx";
 
 const NAV_ITEMS = [
   { id: "dashboard", label: "Resumen", icon: "space_dashboard", path: "/dashboard" },
@@ -15,13 +16,16 @@ const NAV_ITEMS = [
   { id: "animales", label: "Animales", icon: "pets", path: "/animales" },
   { id: "horarios", label: "Horarios", icon: "schedule", path: "/horarios" },
   { id: "dosificacion", label: "Dosificación", icon: "tune", path: "/dosificacion" },
+  { id: "simulador", label: "Simulador", icon: "memory", path: "/simulador" },
   { id: "historial", label: "Historial", icon: "history", path: "/historial" },
   { id: "reportes", label: "Reportes", icon: "assessment", path: "/reportes" },
+  { id: "cuidador", label: "Modo Cuidador", icon: "accessibility_new", path: "/cuidador" },
 ];
 
 const ROLE_BADGE = {
   admin: "bg-primary text-on-primary",
   operador: "bg-secondary-container text-on-secondary-fixed",
+  cuidador: "bg-green-100 text-green-900",
   auditor: "bg-surface-container-high text-on-surface-variant",
 };
 
@@ -48,6 +52,7 @@ export default function AppLayout({ active, searchPlaceholder = "Buscar en el hi
   const [confirmStop, setConfirmStop] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
+  const sim = useSimulator();
 
   async function logout() {
     await cerrarSesion("manual");
@@ -99,6 +104,12 @@ export default function AppLayout({ active, searchPlaceholder = "Buscar en el hi
             <span className="material-symbols-outlined text-[18px]" aria-hidden="true">emergency_home</span>
             <span className="hidden lg:inline">Parada de Emergencia</span>
           </button>
+          {sim.snap.enabled && (
+            <Link to="/simulador" className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-label-sm font-semibold ${sim.snap.online ? "bg-sky-50 border-sky-300 text-sky-900" : "bg-amber-50 border-amber-400 text-amber-900"}`} title="Simulador de alimentación activo en este equipo">
+              <span className={`w-2 h-2 rounded-full ${sim.snap.running.length ? "bg-sky-600 animate-ping" : sim.snap.online ? "bg-sky-600 animate-pulse" : "bg-amber-500"}`}></span>
+              {sim.snap.running.length ? "Tolva ejecutando…" : sim.snap.online ? "Simulador activo" : `Offline (${sim.snap.outbox})`}
+            </Link>
+          )}
           <div className="flex items-center gap-2 pl-2 sm:pl-3 border-l border-surface-container-high">
             <div className="hidden sm:block text-right leading-tight">
               <div className="text-label-md font-label-md text-on-surface max-w-[160px] truncate">{user?.displayName || user?.email}</div>

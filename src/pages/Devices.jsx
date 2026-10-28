@@ -1,8 +1,10 @@
 import React, { useMemo, useState } from "react";
-import { deleteDoc, doc, serverTimestamp, updateDoc } from "firebase/firestore";
+import { deleteDoc, doc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { db } from "../firebase.js";
 import AppLayout from "../components/AppLayout.jsx";
 import ConfirmDialog from "../components/ConfirmDialog.jsx";
+import CredentialsModal from "../components/CredentialsModal.jsx";
+import { randomToken, sha256Hex } from "../utils/crypto.js";
 import ToggleSwitch from "../components/ToggleSwitch.jsx";
 import { Banner, Card, DemoBadge, KpiCard, PageHeader, Spinner, btnOutline, btnPrimary, inputCls } from "../components/ui.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
@@ -38,6 +40,7 @@ export default function Devices() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [autoState, setAutoState] = useState({});
+  const [newCreds, setNewCreds] = useState(null);
 
   const list = useMemo(() => {
     const q = sanitizeText(search).toLowerCase();
@@ -67,9 +70,21 @@ export default function Devices() {
         await sendCommand({ actor: actor(), command: { type: "dispense_test", deviceId: d.serial, pondId: d.pondId, amountG: 250, rations: 1 } });
         flash("success", `Prueba de 250 g enviada a ${d.name}.`);
       } else if (kind === "revoke") {
-        await updateDoc(doc(db, "devices", d.id), { status: "revoked", credentialHash: "", revokedAt: serverTimestamp(), revokedBy: actor().uid });
+        const b = writeBatch(db);
+        b.update(doc(db, "devices", d.id), { status: "revoked", revokedAt: serverTimestamp(), revokedBy: actor().uid });
+        b.set(doc(db, "deviceSecrets", d.id), { credentialHash: "", credentialAlgo: "sha256", updatedBy: actor().uid, updatedAt: serverTimestamp() });
+        await b.commit();
         writeAudit({ actor: actor(), type: "device_revoke", target: d.serial, severity: "warning", details: { pond: d.pondId } });
         flash("success", `Dispositivo ${d.serial} revocado: sus credenciales ya no son válidas.`);
+      } else if (kind === "rotate") {
+        const password = randomToken(32);
+        const b = writeBatch(db);
+        b.set(doc(db, "deviceSecrets", d.id), { credentialHash: await sha256Hex(password), credentialAlgo: "sha256", updatedBy: actor().uid, updatedAt: serverTimestamp() });
+        b.update(doc(db, "devices", d.id), { rotatedAt: serverTimestamp(), rotatedBy: actor().uid });
+        await b.commit();
+        writeAudit({ actor: actor(), type: "device_credentials_rotated", target: d.serial, severity: "warning", details: { pond: d.pondId } });
+        setNewCreds({ serial: d.serial, clientId: d.clientId || "—", username: d.username || `dev_${d.serial.toLowerCase()}`, password, topic: `alimentatec/${d.serial}/#` });
+        flash("success", `Credenciales de ${d.serial} rotadas: la clave anterior ya no funciona.`);
       } else if (kind === "delete") {
         await deleteDoc(doc(db, "devices", d.id));
         writeAudit({ actor: actor(), type: "device_delete", target: d.serial, severity: "warning", details: { pond: d.pondId } });
@@ -85,6 +100,7 @@ export default function Devices() {
 
   const confirmCfg = {
     test: { title: "Enviar prueba de dispensación", msg: (d) => `Se dispensarán 250 g en ${d?.name}. Quedará registrado en la auditoría.`, label: "Enviar prueba", danger: false },
+    rotate: { title: "Rotar credenciales", msg: (d) => `Se generará una clave nueva para ${d?.name}. La clave actual dejará de funcionar de inmediato y el equipo deberá reconfigurarse.`, label: "Rotar clave", danger: true },
     revoke: { title: "Revocar dispositivo", msg: (d) => `${d?.name} perderá el acceso al broker de inmediato. Para reutilizarlo deberá registrarlo de nuevo.`, label: "Revocar", danger: true },
     delete: { title: "Eliminar dispositivo", msg: (d) => `Se eliminará ${d?.name} de forma permanente.`, label: "Eliminar", danger: true },
   }[confirm?.kind] || {};
@@ -160,6 +176,7 @@ export default function Devices() {
                   {d.type === "tolva" && !revoked ? <ToggleSwitch label="Auto-alimentación" checked={auto} disabled={!can("command")} onChange={(v) => toggleAuto(d, v)} /> : <span />}
                   <div className="flex flex-wrap items-center gap-2">
                     {d.type === "tolva" && !revoked && <button className={btnOutline} disabled={!can("command")} onClick={() => setConfirm({ kind: "test", device: d })}><span className="material-symbols-outlined text-[18px]" aria-hidden="true">scatter_plot</span>Prueba 250 g</button>}
+                    {can("devices:write") && !revoked && <button className={btnOutline} disabled={d._demo} onClick={() => setConfirm({ kind: "rotate", device: d })}><span className="material-symbols-outlined text-[18px]" aria-hidden="true">key</span>Rotar clave</button>}
                     {can("devices:revoke") && !revoked && <button className={btnOutline} disabled={d._demo} onClick={() => setConfirm({ kind: "revoke", device: d })}><span className="material-symbols-outlined text-[18px]" aria-hidden="true">block</span>Revocar</button>}
                     {can("devices:revoke") && revoked && <button className={btnOutline} onClick={() => setConfirm({ kind: "delete", device: d })}><span className="material-symbols-outlined text-[18px]" aria-hidden="true">delete</span>Eliminar</button>}
                   </div>
@@ -171,6 +188,7 @@ export default function Devices() {
       )}
 
       <DevicesRegister open={registerOpen} onClose={() => setRegisterOpen(false)} />
+      <CredentialsModal open={!!newCreds} creds={newCreds} title="Nuevas credenciales" onClose={() => setNewCreds(null)} />
       <ConfirmDialog open={!!confirm} busy={busy} danger={confirmCfg.danger} title={confirmCfg.title} message={confirmCfg.msg?.(confirm?.device)} confirmLabel={confirmCfg.label} onConfirm={runConfirm} onCancel={() => setConfirm(null)} />
     </AppLayout>
   );

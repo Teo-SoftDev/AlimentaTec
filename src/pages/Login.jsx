@@ -6,17 +6,18 @@ import { AppError } from "../utils/errors.js";
 import { validate, loginSchema, emailSchema } from "../utils/validation.js";
 import { attemptsLeft, getLockRemainingMs, MAX_ATTEMPTS } from "../utils/lockout.js";
 import { ALLOWED_PATHS } from "../utils/constants.js";
+import { homeFor } from "../utils/permissions.js";
 import PasswordField from "../components/PasswordField.jsx";
 import { Banner, inputCls } from "../components/ui.jsx";
 
 const fmt = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
 
 export default function Login() {
-  const { user, rolReady, iniciarSesion, recuperarContrasena } = useAuth();
+  const { user, role, rolReady, iniciarSesion, recuperarContrasena } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   // Evita open-redirect: solo rutas internas conocidas.
-  const from = ALLOWED_PATHS.includes(location.state?.from) ? location.state.from : "/dashboard";
+  const from = ALLOWED_PATHS.includes(location.state?.from) && (role !== "cuidador" || ["/cuidador", "/dashboard"].includes(location.state.from)) ? location.state.from : homeFor(role);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

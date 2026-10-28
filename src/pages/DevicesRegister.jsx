@@ -3,9 +3,10 @@
 // Firestore solo se guarda el HASH SHA-256. A01: permiso + reglas de servidor.
 // A03: serial/QR validados con Zod y allowlists. A09: alta auditada.
 import React, { useEffect, useRef, useState } from "react";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { doc, getDoc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { db } from "../firebase.js";
 import Modal from "../components/Modal.jsx";
+import CredentialsModal from "../components/CredentialsModal.jsx";
 import { Banner, Field, btnOutline, btnPrimary, inputCls } from "../components/ui.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
 import { sha256Hex, randomToken } from "../utils/crypto.js";
@@ -25,8 +26,6 @@ export default function DevicesRegister({ open, onClose }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [creds, setCreds] = useState(null);
-  const [saved, setSaved] = useState(false);
-  const [copied, setCopied] = useState("");
   const [scanning, setScanning] = useState(false);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -41,7 +40,7 @@ export default function DevicesRegister({ open, onClose }) {
   useEffect(() => {
     if (!open) {
       stopScan();
-      setTab("serial"); setForm(EMPTY); setQrText(""); setErrors({}); setError(""); setCreds(null); setSaved(false); setCopied("");
+      setTab("serial"); setForm(EMPTY); setQrText(""); setErrors({}); setError(""); setCreds(null);
     }
     return stopScan;
   }, [open]);
@@ -107,11 +106,14 @@ export default function DevicesRegister({ open, onClose }) {
       const password = randomToken(32);
       const clientId = `at-${randomToken(6)}`;
       const username = `dev_${d.serial.toLowerCase()}`;
-      await setDoc(ref, {
+      const batch = writeBatch(db);
+      batch.set(ref, {
         serial: d.serial, name: d.name, type: d.type, pondId: d.pondId, protocol: d.protocol, firmware: d.firmware,
-        status: "offline", credentialHash: await sha256Hex(password), credentialAlgo: "sha256", clientId, username,
-        createdBy: a.uid, createdAt: serverTimestamp(),
+        status: "offline", clientId, username, createdBy: a.uid, createdAt: serverTimestamp(),
       });
+      // El hash vive en una colección aparte que NINGÚN cliente puede leer (solo la API del servidor).
+      batch.set(doc(db, "deviceSecrets", d.serial), { credentialHash: await sha256Hex(password), credentialAlgo: "sha256", updatedBy: a.uid, updatedAt: serverTimestamp() });
+      await batch.commit();
       audit("device_add", d.serial, { tipo: d.type, pond: d.pondId, protocolo: d.protocol }, "info");
       setCreds({ serial: d.serial, clientId, username, password, topic: `alimentatec/${d.serial}/#` });
     } catch (err) {
@@ -121,33 +123,7 @@ export default function DevicesRegister({ open, onClose }) {
     }
   }
 
-  async function copy(label, value) {
-    try { await navigator.clipboard.writeText(value); setCopied(label); setTimeout(() => setCopied(""), 1500); } catch { /* ignorar */ }
-  }
-
-  const closeGuard = () => { if (creds && !saved) return; onClose(); };
-
-  if (creds) {
-    const rows = [["Broker", "mqtts://broker.alimentatec.net:8883"], ["Client ID", creds.clientId], ["Usuario", creds.username], ["Contraseña", creds.password], ["Tópicos permitidos", creds.topic]];
-    return (
-      <Modal open={open} title="Dispositivo registrado" onClose={closeGuard} persistent={!saved} size="md">
-        <div className="space-y-4">
-          <Banner tone="warn" icon="key">Estas credenciales se muestran <strong>una sola vez</strong>. En el sistema solo se conserva su huella (hash); si las pierde deberá revocar y registrar de nuevo el dispositivo.</Banner>
-          <dl className="space-y-2">
-            {rows.map(([k, v]) => (
-              <div key={k} className="flex items-center gap-2">
-                <dt className="w-36 text-label-md font-label-md text-secondary shrink-0">{k}</dt>
-                <dd className="flex-1 min-w-0 font-mono text-xs bg-surface-container-low border border-outline-variant rounded px-2 py-1.5 break-all">{v}</dd>
-                <button type="button" className={btnOutline} onClick={() => copy(k, v)} aria-label={`Copiar ${k}`}>{copied === k ? "✓" : "Copiar"}</button>
-              </div>
-            ))}
-          </dl>
-          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} className="h-4 w-4 rounded text-primary" />He guardado las credenciales en un lugar seguro</label>
-          <div className="flex justify-end"><button className={btnPrimary} disabled={!saved} onClick={onClose}>Finalizar</button></div>
-        </div>
-      </Modal>
-    );
-  }
+  if (creds) return <CredentialsModal open={open} creds={creds} title="Dispositivo registrado" onClose={onClose} />;
 
   return (
     <Modal open={open} title="Registrar nuevo dispositivo" onClose={onClose} size="lg">

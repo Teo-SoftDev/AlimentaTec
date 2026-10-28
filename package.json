@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node tests/utils.test.mjs && node tests/schemas.test.mjs && node tests/simulator.test.mjs && npm --prefix functions test",
+    "test:api": "npm --prefix functions test",
+    "api:local": "npm --prefix functions run start:local",
+    "sim:sensor": "node tools/sensor-simulator/simulate.mjs"
   },
   "dependencies": {
     "firebase": "^10.12.2",

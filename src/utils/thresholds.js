@@ -4,6 +4,7 @@ export const WATER_METRICS = {
   oxygen: { label: "Oxígeno disuelto", unit: "mg/L", decimals: 1, icon: "air" },
   temperature: { label: "Temperatura", unit: "°C", decimals: 1, icon: "thermostat" },
   turbidity: { label: "Turbidez", unit: "NTU", decimals: 1, icon: "opacity" },
+  waterLevel: { label: "Nivel de agua", unit: "%", decimals: 0, icon: "water" },
 };
 
 export function statusFor(metric, v) {
@@ -17,6 +18,8 @@ export function statusFor(metric, v) {
       return v >= 10 && v <= 18 ? "ok" : v >= 8 && v <= 20 ? "warn" : "crit";
     case "turbidity":
       return v <= 3 ? "ok" : v <= 5 ? "warn" : "crit";
+    case "waterLevel":
+      return v >= 70 && v <= 98 ? "ok" : v >= 55 ? "warn" : "crit";
     default:
       return "warn";
   }

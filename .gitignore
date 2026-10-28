@@ -3,7 +3,5 @@ dist
 .env
 .env.local
 .env.*.local
-serviceAccount.json
 serviceAccount*.json
 .DS_Store
-.vercel/

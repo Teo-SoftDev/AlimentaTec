@@ -7,8 +7,8 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
 const [email, role] = process.argv.slice(2);
-if (!email || !["admin", "operador", "auditor"].includes(role)) {
-  console.error("Uso: node scripts/set-role.mjs <correo> <admin|operador|auditor>");
+if (!email || !["admin", "operador", "auditor", "cuidador"].includes(role)) {
+  console.error("Uso: node scripts/set-role.mjs <correo> <admin|operador|auditor|cuidador>");
   process.exit(1);
 }
 initializeApp({ credential: applicationDefault() });

@@ -1,0 +1,552 @@
+{
+  "info": {
+    "name": "AlimentaTec · API de sensores",
+    "description": "Colección para simular sensores de campo. 1) Importe también el entorno 'AlimentaTec – Local'. 2) Cargue deviceId y apiKey (la clave se muestra UNA vez al registrar el dispositivo en la app). 3) Ejecute con el Collection Runner variando la variable `mode` para forzar alertas críticas.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('API disponible', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Obtener JWT del dispositivo",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 con token', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.environment.set('jwt', j.token);",
+              "pm.test('JWT emitido', () => pm.expect(j.token).to.be.a('string'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "description": "Intercambia la API key por un JWT de 15 min. Luego use la carpeta con {{jwt}}.",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Device-Id",
+            "value": "{{deviceId}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{apiKey}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/token",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "token"
+          ]
+        }
+      }
+    },
+    {
+      "name": "2. Telemetría (API key)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Genera lecturas realistas con ligera fluctuación aleatoria según el modo (variable {{mode}}).",
+              "const mode = pm.environment.get('mode') || 'normal';",
+              "const j = (a) => (Math.random() - 0.5) * 2 * a;",
+              "const prev = JSON.parse(pm.environment.get('last_state') || '{\"t\":14.2,\"ph\":7.4,\"o\":7.8,\"l\":86}');",
+              "const target = {",
+              "  t: mode === 'high-temp' ? 22.5 : 14.2,",
+              "  ph: mode === 'ph-drift' ? 6.1 : 7.4,",
+              "  o: mode === 'low-oxygen' ? 3.8 : 7.8,",
+              "  l: mode === 'low-level' ? 42 : 86,",
+              "};",
+              "const sp = mode === 'normal' ? 0.15 : 0.45;",
+              "const st = { t: prev.t + (target.t - prev.t) * sp + j(0.08), ph: prev.ph + (target.ph - prev.ph) * sp + j(0.03), o: prev.o + (target.o - prev.o) * sp + j(0.12), l: prev.l + (target.l - prev.l) * sp + j(0.4) };",
+              "pm.environment.set('last_state', JSON.stringify(st));",
+              "const r = (v, d) => Math.round(v * 10 ** d) / 10 ** d;",
+              "pm.environment.set('readingId', 'pm' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36));",
+              "pm.environment.set('temperature', r(st.t, 2));",
+              "pm.environment.set('ph', r(st.ph, 2));",
+              "pm.environment.set('oxygen', r(st.o, 2));",
+              "pm.environment.set('waterLevel', r(st.l, 1));",
+              ""
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Aceptada (202)', () => pm.response.to.have.status(202));",
+              "const j = pm.response.json();",
+              "pm.test('Estado del estanque informado', () => pm.expect(j.pondStatus).to.be.oneOf(['ok','warn','crit']));",
+              "if (j.pondStatus === 'crit') console.warn('ALERTA CRÍTICA generada para ' + pm.environment.get('pondId'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "description": "Cambie la variable `mode` del entorno: normal | low-oxygen | high-temp | ph-drift | low-level.",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Device-Id",
+            "value": "{{deviceId}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{apiKey}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"readingId\": \"{{readingId}}\",\n  \"pondId\": \"{{pondId}}\",\n  \"sensorType\": \"{{sensorType}}\",\n  \"readings\": {\n    \"temperature\": {{temperature}},\n    \"ph\": {{ph}},\n    \"oxygen\": {{oxygen}},\n    \"waterLevel\": {{waterLevel}}\n  },\n  \"battery\": 92,\n  \"rssi\": -71,\n  \"firmware\": \"2.4.11\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/telemetry",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "telemetry"
+          ]
+        }
+      }
+    },
+    {
+      "name": "3. Telemetría (JWT)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Genera lecturas realistas con ligera fluctuación aleatoria según el modo (variable {{mode}}).",
+              "const mode = pm.environment.get('mode') || 'normal';",
+              "const j = (a) => (Math.random() - 0.5) * 2 * a;",
+              "const prev = JSON.parse(pm.environment.get('last_state') || '{\"t\":14.2,\"ph\":7.4,\"o\":7.8,\"l\":86}');",
+              "const target = {",
+              "  t: mode === 'high-temp' ? 22.5 : 14.2,",
+              "  ph: mode === 'ph-drift' ? 6.1 : 7.4,",
+              "  o: mode === 'low-oxygen' ? 3.8 : 7.8,",
+              "  l: mode === 'low-level' ? 42 : 86,",
+              "};",
+              "const sp = mode === 'normal' ? 0.15 : 0.45;",
+              "const st = { t: prev.t + (target.t - prev.t) * sp + j(0.08), ph: prev.ph + (target.ph - prev.ph) * sp + j(0.03), o: prev.o + (target.o - prev.o) * sp + j(0.12), l: prev.l + (target.l - prev.l) * sp + j(0.4) };",
+              "pm.environment.set('last_state', JSON.stringify(st));",
+              "const r = (v, d) => Math.round(v * 10 ** d) / 10 ** d;",
+              "pm.environment.set('readingId', 'pm' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36));",
+              "pm.environment.set('temperature', r(st.t, 2));",
+              "pm.environment.set('ph', r(st.ph, 2));",
+              "pm.environment.set('oxygen', r(st.o, 2));",
+              "pm.environment.set('waterLevel', r(st.l, 1));",
+              ""
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Aceptada con JWT', () => pm.response.to.have.status(202));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "description": "",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Device-Id",
+            "value": "{{deviceId}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{jwt}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"readingId\": \"{{readingId}}\",\n  \"pondId\": \"{{pondId}}\",\n  \"sensorType\": \"{{sensorType}}\",\n  \"readings\": {\n    \"temperature\": {{temperature}},\n    \"ph\": {{ph}},\n    \"oxygen\": {{oxygen}},\n    \"waterLevel\": {{waterLevel}}\n  },\n  \"battery\": 92,\n  \"rssi\": -71,\n  \"firmware\": \"2.4.11\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/telemetry",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "telemetry"
+          ]
+        }
+      }
+    },
+    {
+      "name": "4. Reenvío idempotente (mismo readingId)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// No regenera readingId: reutiliza el de la petición anterior"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Duplicada (200)', () => pm.response.to.have.status(200));",
+              "pm.test('status=duplicate', () => pm.expect(pm.response.json().status).to.eql('duplicate'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "description": "",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Device-Id",
+            "value": "{{deviceId}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{apiKey}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"readingId\": \"{{readingId}}\",\n  \"pondId\": \"{{pondId}}\",\n  \"sensorType\": \"{{sensorType}}\",\n  \"readings\": {\n    \"temperature\": {{temperature}},\n    \"ph\": {{ph}},\n    \"oxygen\": {{oxygen}},\n    \"waterLevel\": {{waterLevel}}\n  },\n  \"battery\": 92,\n  \"rssi\": -71,\n  \"firmware\": \"2.4.11\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/telemetry",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "telemetry"
+          ]
+        }
+      }
+    },
+    {
+      "name": "5. Lote offline (con marcas de tiempo pasadas)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Genera lecturas realistas con ligera fluctuación aleatoria según el modo (variable {{mode}}).",
+              "const mode = pm.environment.get('mode') || 'normal';",
+              "const j = (a) => (Math.random() - 0.5) * 2 * a;",
+              "const prev = JSON.parse(pm.environment.get('last_state') || '{\"t\":14.2,\"ph\":7.4,\"o\":7.8,\"l\":86}');",
+              "const target = {",
+              "  t: mode === 'high-temp' ? 22.5 : 14.2,",
+              "  ph: mode === 'ph-drift' ? 6.1 : 7.4,",
+              "  o: mode === 'low-oxygen' ? 3.8 : 7.8,",
+              "  l: mode === 'low-level' ? 42 : 86,",
+              "};",
+              "const sp = mode === 'normal' ? 0.15 : 0.45;",
+              "const st = { t: prev.t + (target.t - prev.t) * sp + j(0.08), ph: prev.ph + (target.ph - prev.ph) * sp + j(0.03), o: prev.o + (target.o - prev.o) * sp + j(0.12), l: prev.l + (target.l - prev.l) * sp + j(0.4) };",
+              "pm.environment.set('last_state', JSON.stringify(st));",
+              "const r = (v, d) => Math.round(v * 10 ** d) / 10 ** d;",
+              "pm.environment.set('readingId', 'pm' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36));",
+              "pm.environment.set('temperature', r(st.t, 2));",
+              "pm.environment.set('ph', r(st.ph, 2));",
+              "pm.environment.set('oxygen', r(st.o, 2));",
+              "pm.environment.set('waterLevel', r(st.l, 1));",
+              "",
+              "pm.environment.set('ts1', Date.now() - 600000);",
+              "pm.environment.set('ts2', Date.now() - 300000);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Lote procesado', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.test('Sin rechazos', () => pm.expect(j.rejected).to.eql(0));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "description": "",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Device-Id",
+            "value": "{{deviceId}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{apiKey}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"readings\": [\n    { \"readingId\": \"{{readingId}}b1\", \"pondId\": \"{{pondId}}\", \"ts\": {{ts1}}, \"readings\": { \"oxygen\": {{oxygen}} } },\n    { \"readingId\": \"{{readingId}}b2\", \"pondId\": \"{{pondId}}\", \"ts\": {{ts2}}, \"readings\": { \"oxygen\": {{oxygen}}, \"ph\": {{ph}} } }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/telemetry/batch",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "telemetry",
+            "batch"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Pruebas negativas (seguridad)",
+      "item": [
+        {
+          "name": "Valor fuera de rango (pH=99) → 422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 inválido', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"readingId\": \"neg{{$randomInt}}abcdef\", \"pondId\": \"{{pondId}}\", \"readings\": { \"ph\": 99 } }"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/telemetry",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "telemetry"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Campo desconocido → 422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 inválido', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"readingId\": \"neg{{$randomInt}}abcdef\", \"pondId\": \"{{pondId}}\", \"readings\": { \"ph\": 7 }, \"admin\": true }"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/telemetry",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "telemetry"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Clave incorrecta → 401 genérico",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));",
+                  "pm.test('Sin pistas en el mensaje', () => pm.expect(pm.response.text()).to.not.include('revocad'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer clave-incorrecta-0000000000000000"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"readingId\": \"neg{{$randomInt}}abcdef\", \"pondId\": \"{{pondId}}\", \"readings\": { \"ph\": 7 } }"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/telemetry",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "telemetry"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Estanque ajeno → 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422/403', () => pm.expect([403,422]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"readingId\": \"neg{{$randomInt}}abcdef\", \"pondId\": \"AQ-99\", \"readings\": { \"ph\": 7 } }"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/telemetry",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "telemetry"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

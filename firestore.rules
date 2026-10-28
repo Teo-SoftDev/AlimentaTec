@@ -1,7 +1,7 @@
 rules_version = '2';
 
 // AlimentaTec — Reglas de seguridad de Firestore (A01, A03, A04, A09).
-// Roles: admin · operador · auditor. El rol sale del custom claim `role`
+// Roles: admin · operador · auditor · cuidador. El rol sale del custom claim `role`
 // (si existe) o del documento users/{uid}. DENEGAR por defecto.
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -17,6 +17,9 @@ service cloud.firestore {
     function isAdmin()    { return active() && role() == 'admin'; }
     function isOperator() { return active() && role() in ['admin', 'operador']; }
     function canRead()    { return active() && role() in ['admin', 'operador', 'auditor']; }
+    // El cuidador solo ve lo necesario para su vista simplificada (nunca auditoría, lotes ni reportes).
+    function canReadOps() { return active() && role() in ['admin', 'operador', 'auditor', 'cuidador']; }
+    function canCommand() { return active() && role() in ['admin', 'operador', 'cuidador']; }
 
     function str(v, lo, hi) { return v is string && v.size() >= lo && v.size() <= hi; }
     function num(v, lo, hi) { return v is number && v >= lo && v <= hi; }
@@ -42,7 +45,7 @@ service cloud.firestore {
 
     /* ---------- dispositivos IoT ---------- */
     function validDevice(d) {
-      return d.keys().hasOnly(['serial','name','type','pondId','protocol','firmware','status','credentialHash','credentialAlgo','clientId','username','createdBy','createdAt'])
+      return d.keys().hasOnly(['serial','name','type','pondId','protocol','firmware','status','clientId','username','createdBy','createdAt'])
         && d.serial.matches('^[A-Z0-9]{2,6}(-[A-Z0-9]{2,12}){1,3}$')
         && str(d.name, 2, 60)
         && d.type in ['tolva','sensor']
@@ -50,17 +53,27 @@ service cloud.firestore {
         && d.protocol in ['LoRaWAN','WiFi','4G']
         && d.firmware.matches('^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{1,3}$')
         && d.status == 'offline'
-        && str(d.credentialHash, 64, 64)
         && d.createdBy == request.auth.uid
         && d.createdAt == request.time;
     }
     match /devices/{id} {
-      allow read: if canRead();
+      allow read: if canReadOps();
       allow create: if isAdmin() && id == request.resource.data.serial && validDevice(request.resource.data);
       // Solo el admin revoca; la revocación invalida las credenciales.
       allow update: if isAdmin()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','credentialHash','revokedAt','revokedBy','name','pondId','firmware']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','revokedAt','revokedBy','rotatedAt','rotatedBy','name','pondId','firmware']);
       allow delete: if isAdmin() && resource.data.status == 'revoked';
+    }
+
+    // Hash de la API key de cada dispositivo: NINGÚN cliente puede leerlo; solo la API (Admin SDK) lo verifica.
+    match /deviceSecrets/{id} {
+      allow read, delete: if false;
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['credentialHash','credentialAlgo','updatedBy','updatedAt'])
+        && str(request.resource.data.credentialHash, 0, 64)
+        && request.resource.data.credentialAlgo == 'sha256'
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time;
     }
 
     /* ---------- lotes de peces (sin negativos ni desbordes) ---------- */
@@ -98,7 +111,7 @@ service cloud.firestore {
         && d.updatedBy == request.auth.uid && d.updatedAt == request.time;
     }
     match /schedules/{id} {
-      allow read: if canRead();
+      allow read: if canReadOps();
       allow create: if isOperator() && validSchedule(request.resource.data);
       allow update: if isOperator() && (validSchedule(request.resource.data)
         || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['enabled','updatedBy','updatedAt']));
@@ -124,7 +137,7 @@ service cloud.firestore {
     // (Cloud Function / broker). Aquí se acotan tipo, tamaño y autoría.
     match /commands/{id} {
       allow read: if canRead();
-      allow create: if isOperator()
+      allow create: if canCommand()
         && request.resource.data.keys().hasOnly(['type','deviceId','pondId','amountG','rations','enabled','uid','status','ts'])
         && request.resource.data.type in ['dispense_manual','dispense_test','toggle_auto','emergency_stop']
         && request.resource.data.deviceId.matches('^(ALL|[A-Za-z0-9-]{3,32})$')
@@ -153,7 +166,7 @@ service cloud.firestore {
 
     /* ---------- alertas ---------- */
     match /alerts/{id} {
-      allow read: if canRead();
+      allow read: if canReadOps();
       allow create: if isOperator()
         && request.resource.data.keys().hasOnly(['severity','metric','value','pond','message','uid','ts'])
         && request.resource.data.severity in ['info','warning','critical']
@@ -171,6 +184,50 @@ service cloud.firestore {
         && request.resource.data.ts == request.time
         && str(request.resource.data.kind, 1, 40) && str(request.resource.data.detail, 1, 300);
       allow update: if isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['acknowledged']);
+      allow delete: if false;
+    }
+
+    /* ---------- telemetría recibida por la API (solo la escribe el servidor) ---------- */
+    match /pondStatus/{id} {
+      allow read: if canReadOps();
+      allow write: if false;
+    }
+    match /telemetry/{id} {
+      allow read: if canRead();
+      allow write: if false;
+    }
+
+    /* ---------- simulador de alimentación programada ---------- */
+    // ID determinista: <scheduleId>_<AAAA-MM-DD>_<HHMM> (prefijo x = reloj acelerado). Garantiza que una
+    // misma porción no se registre dos veces aunque haya varios equipos o reconexiones.
+    function validFeedingEvent(d, id) {
+      return d.keys().hasOnly(['occurrenceId','scheduleId','scheduleName','pondId','plannedKg','doseKg','durationSec','mechanism','late','delayMin','scheduledAtMs','executedAtMs','simulated','offlineExecuted','reason','status','progress','finishedAtMs','hostUid','ts'])
+        && d.occurrenceId == id
+        && id.matches('^x?[A-Za-z0-9-]{3,48}_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}$')
+        && pond(d.pondId)
+        && d.status in ['running','completed','skipped']
+        && num(d.doseKg, 0, 50) && num(d.plannedKg, 0, 50)
+        && num(d.progress, 0, 100)
+        && str(d.reason, 0, 200)
+        && d.hostUid == request.auth.uid
+        && d.ts == request.time;
+    }
+    match /feedingEvents/{id} {
+      allow read: if canReadOps();
+      allow create: if isOperator() && validFeedingEvent(request.resource.data, id);
+      // Solo puede avanzar un evento en curso (progreso / cierre). Nunca se reescribe ni se borra.
+      allow update: if isOperator() && resource.data.status == 'running'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['progress','status','finishedAtMs'])
+        && request.resource.data.status in ['running','completed']
+        && num(request.resource.data.progress, 0, 100);
+      allow delete: if false;
+    }
+    match /simulatorState/{id} {
+      allow read: if canReadOps();
+      allow create, update: if isOperator() && id == 'main'
+        && request.resource.data.keys().hasOnly(['enabled','online','speed','behavior','running','pendingOutbox','lastBeatMs','hostUid','hostEmail','ts'])
+        && request.resource.data.hostUid == request.auth.uid
+        && request.resource.data.ts == request.time;
       allow delete: if false;
     }
 

@@ -41,3 +41,6 @@ body,
   box-shadow: none !important;
   border-color: #004349 !important;
 }
+
+/* Cuenta atrás visual del botón de doble toque */
+@keyframes tapwindow { from { width: 100%; } to { width: 0%; } }

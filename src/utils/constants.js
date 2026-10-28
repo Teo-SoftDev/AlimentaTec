@@ -10,7 +10,7 @@ export const pondName = (id) => PONDS.find((p) => p.id === id)?.name || id;
 
 // Rutas internas permitidas como destino tras el login (evita open-redirect).
 export const ALLOWED_PATHS = [
-  "/dashboard", "/monitoreo", "/dispositivos", "/animales", "/horarios", "/dosificacion", "/historial", "/reportes",
+  "/dashboard", "/monitoreo", "/dispositivos", "/animales", "/horarios", "/dosificacion", "/historial", "/reportes", "/cuidador", "/simulador",
 ];
 
 export const EVENT_TYPES = {
@@ -33,6 +33,18 @@ export const EVENT_TYPES = {
   telemetry_rejected: "Telemetría rechazada",
   integrity_check: "Verificación de integridad",
   pin_set: "PIN configurado",
+  scheduled_feeding: "Alimentación automática",
+  scheduled_skipped: "Alimentación omitida",
+  sim_offline: "Simulador sin conexión",
+  sim_online: "Simulador reconectado",
+  sim_sync: "Sincronización tras desconexión",
+  device_credentials_rotated: "Credenciales rotadas",
+  api_auth_failed: "API: fallo de autenticación",
+  api_rate_limited: "API: límite de tasa",
+  api_invalid_payload: "API: payload inválido",
+  api_forbidden_device_type: "API: dispositivo no autorizado",
+  api_pond_mismatch: "API: estanque no coincide",
+  api_device_offline: "API: sensor sin conexión",
 };
 export const eventLabel = (t) => EVENT_TYPES[t] || t;
 

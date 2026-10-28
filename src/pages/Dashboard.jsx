@@ -4,17 +4,9 @@ import AppLayout from "../components/AppLayout.jsx";
 import { Banner, Card, DemoBadge, KpiCard, PageHeader } from "../components/ui.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
 import { toDate, useCollection } from "../hooks/useCollection.js";
-import { DEMO_ALERTS, DEMO_BATCHES, DEMO_DEVICES } from "../utils/demoData.js";
+import { DEMO_ALERTS, DEMO_BATCHES, DEMO_DEVICES, POND_READINGS } from "../utils/demoData.js";
 import { PONDS, pondName } from "../utils/constants.js";
 import { STATUS_STYLES, statusFor, worstStatus } from "../utils/thresholds.js";
-
-// Última lectura de referencia por estanque (la telemetría en vivo está en /monitoreo).
-const POND_READINGS = {
-  "AQ-01": { oxygen: 7.2, temperature: 12.8, ph: 7.5, turbidity: 1.6 },
-  "AQ-04": { oxygen: 7.8, temperature: 14.2, ph: 7.4, turbidity: 1.8 },
-  "AQ-06": { oxygen: 6.0, temperature: 24.1, ph: 7.9, turbidity: 3.4 },
-  "AQ-09": { oxygen: 5.0, temperature: 16.9, ph: 7.2, turbidity: 2.2 },
-};
 
 const feedRatePct = (g) => (g < 5 ? 6 : g < 20 ? 4 : g < 100 ? 2.8 : g < 300 ? 2 : 1.4);
 
@@ -23,18 +15,21 @@ export default function Dashboard() {
   const batches = useCollection("batches", { limitN: 200, fallback: DEMO_BATCHES });
   const devices = useCollection("devices", { limitN: 200, fallback: DEMO_DEVICES });
   const alerts = useCollection("alerts", { orderByField: "ts", direction: "desc", limitN: 20, fallback: DEMO_ALERTS });
+  const pondQ = useCollection("pondStatus", { limitN: 20 });
   const secAlerts = useCollection("securityAlerts", { orderByField: "ts", direction: "desc", limitN: 5, enabled: can("security:view") });
 
   const stats = useMemo(() => {
     const biomass = batches.items.reduce((s, b) => s + ((b.population || 0) * (b.avgWeightG || 0)) / 1000, 0);
     const dailyFeed = batches.items.reduce((s, b) => s + (((b.population || 0) * (b.avgWeightG || 0)) / 1000) * (feedRatePct(b.avgWeightG || 0) / 100), 0);
+    const real = new Map(pondQ.items.map((x) => [x.id, x]));
     const tanks = PONDS.map((p) => {
-      const r = POND_READINGS[p.id];
-      return { ...p, readings: r, status: worstStatus(Object.entries(r).map(([m, v]) => statusFor(m, v))) };
+      const rt = real.get(p.id);
+      const r = rt ? Object.fromEntries(Object.entries(rt.metrics || {}).map(([m, v]) => [m, v.value])) : POND_READINGS[p.id];
+      return { ...p, live: !!rt, readings: r, status: worstStatus(Object.entries(r).map(([m, v]) => statusFor(m, v))) };
     });
     const dev = devices.items.filter((d) => d.status !== "revoked");
     return { biomass, dailyFeed, tanks, online: dev.filter((d) => d.status === "online").length, totalDev: dev.length };
-  }, [batches.items, devices.items]);
+  }, [batches.items, devices.items, pondQ.items]);
 
   const critical = alerts.items.filter((a) => a.severity === "critical" || a.severity === "warning");
   const okTanks = stats.tanks.filter((t) => t.status === "ok").length;
@@ -60,7 +55,7 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <Card className="lg:col-span-7 p-5" aria-labelledby="h-ponds">
-          <h2 id="h-ponds" className="text-headline-sm font-headline-sm text-on-surface mb-4">Estado por estanque</h2>
+          <div className="flex items-center justify-between mb-4"><h2 id="h-ponds" className="text-headline-sm font-headline-sm text-on-surface">Estado por estanque</h2><DemoBadge show={!pondQ.items.length} /></div>
           <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {stats.tanks.map((t) => {
               const st = STATUS_STYLES[t.status];
@@ -74,15 +69,15 @@ export default function Dashboard() {
                   </div>
                   <p className="text-label-sm font-label-sm text-secondary">{t.species}</p>
                   <dl className="grid grid-cols-4 gap-1 mt-2 text-center">
-                    {[["O₂", t.readings.oxygen, "oxygen"], ["T°", t.readings.temperature, "temperature"], ["pH", t.readings.ph, "ph"], ["NTU", t.readings.turbidity, "turbidity"]].map(([l, v, m]) => (
-                      <div key={l}><dt className="text-[10px] text-secondary">{l}</dt><dd className={`font-mono text-xs font-bold ${STATUS_STYLES[statusFor(m, v)].text}`}>{v}</dd></div>
+                    {[["O₂", t.readings.oxygen, "oxygen"], ["T°", t.readings.temperature, "temperature"], ["pH", t.readings.ph, "ph"], ["Nivel", t.readings.waterLevel, "waterLevel"]].map(([l, v, m]) => (
+                      <div key={l}><dt className="text-[10px] text-secondary">{l}</dt><dd className={`font-mono text-xs font-bold ${v === undefined ? "text-secondary" : STATUS_STYLES[statusFor(m, v)].text}`}>{v ?? "—"}</dd></div>
                     ))}
                   </dl>
                 </li>
               );
             })}
           </ul>
-          <p className="text-label-sm font-label-sm text-secondary mt-3">Lecturas de referencia. Telemetría firmada en vivo en <Link to="/monitoreo" className="text-primary font-semibold hover:underline">Monitoreo</Link>.</p>
+          <p className="text-label-sm font-label-sm text-secondary mt-3">{stats.tanks.some((t) => t.live) ? "Lecturas recibidas por la API de sensores (tiempo real). " : "Lecturas de referencia: aún no llegan datos de la API. "}Detalle en <Link to="/monitoreo" className="text-primary font-semibold hover:underline">Monitoreo</Link>.</p>
         </Card>
 
         <Card className="lg:col-span-5 p-5" aria-labelledby="h-alerts">

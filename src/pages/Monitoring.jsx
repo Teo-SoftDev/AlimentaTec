@@ -7,6 +7,7 @@ import LineChart from "../components/LineChart.jsx";
 import { Banner, Card, PageHeader, btnOutline } from "../components/ui.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
 import { sendCommand } from "../services/commands.js";
+import { useCollection } from "../hooks/useCollection.js";
 import { friendlyError } from "../utils/errors.js";
 import { REJECT_REASONS, TelemetryVerifier, createSimulatedDevice } from "../utils/telemetry.js";
 import { STATUS_STYLES, WATER_METRICS, statusFor } from "../utils/thresholds.js";
@@ -34,6 +35,7 @@ export default function Monitoring() {
   const [feeding, setFeeding] = useState(false);
   const [notice, setNotice] = useState(null);
   const [ready, setReady] = useState(false);
+  const apiQ = useCollection("pondStatus", { limitN: 20 });
   const sim = useRef({ device: null, verifier: null, lowUntil: 0, feedUntil: 0, v: { ph: 7.4, oxygen: 7.8, temperature: 14.2, turbidity: 1.8 }, lastAlert: 0, tamperNext: false });
 
   const pushEvent = (e) => setEvents((ev) => [{ id: crypto.randomUUID(), time: timeLabel(), ...e }, ...ev].slice(0, 20));
@@ -191,6 +193,23 @@ export default function Monitoring() {
           </Card>
         </div>
       </div>
+
+      <Card className="p-5" aria-labelledby="h-api">
+        <div className="flex items-center justify-between mb-3">
+          <h2 id="h-api" className="text-headline-sm font-headline-sm text-on-surface flex items-center gap-2"><span className="material-symbols-outlined text-primary" aria-hidden="true">api</span>Lecturas recibidas por la API de sensores</h2>
+          <span className="text-label-sm text-secondary">POST /api/v1/telemetry · tiempo real</span>
+        </div>
+        {apiQ.items.length === 0 ? <p className="text-sm text-secondary">Aún no llegan lecturas. Use <code className="font-mono">tools/sensor-simulator/simulate.mjs</code> o la colección Postman para enviar telemetría con la clave de un sensor registrado.</p> : (
+          <ul className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {apiQ.items.map((p) => { const st = STATUS_STYLES[p.status] || STATUS_STYLES.warn; return (
+              <li key={p.id} className="border border-surface-container-high rounded-lg p-3 bg-surface">
+                <div className="flex items-center justify-between"><span className="font-semibold text-sm">{p.id}</span><span className={`px-2 py-0.5 rounded border text-label-sm ${st.pill}`}>{st.label}</span></div>
+                <dl className="grid grid-cols-4 gap-1 mt-2 text-center">{Object.entries(p.metrics || {}).map(([m, v]) => <div key={m}><dt className="text-[10px] text-secondary">{WATER_METRICS[m]?.label || m}</dt><dd className={`font-mono text-xs font-bold ${STATUS_STYLES[v.status]?.text}`}>{v.value}</dd></div>)}</dl>
+                <p className="text-label-sm text-secondary mt-1">Actualizado: {p.updatedAtMs ? new Date(p.updatedAtMs).toLocaleTimeString("es", { hour12: false }) : "—"}</p>
+              </li>); })}
+          </ul>
+        )}
+      </Card>
 
       <Card className="p-4" aria-labelledby="h-sim">
         <h2 id="h-sim" className="text-label-lg font-label-lg text-on-surface mb-2">Herramientas de simulación (demostración de seguridad)</h2>

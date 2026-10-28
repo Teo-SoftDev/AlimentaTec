@@ -2,6 +2,14 @@
 // colección de Firestore correspondiente está vacía (y quedan marcados como demo).
 import { PONDS } from "./constants.js";
 
+// Lecturas de referencia por estanque (se usan solo si la API aún no ha enviado datos reales).
+export const POND_READINGS = {
+  "AQ-01": { oxygen: 7.2, temperature: 12.8, ph: 7.5, turbidity: 1.6, waterLevel: 88 },
+  "AQ-04": { oxygen: 7.8, temperature: 14.2, ph: 7.4, turbidity: 1.8, waterLevel: 86 },
+  "AQ-06": { oxygen: 6.0, temperature: 24.1, ph: 7.9, turbidity: 3.4, waterLevel: 82 },
+  "AQ-09": { oxygen: 5.0, temperature: 16.9, ph: 7.2, turbidity: 2.2, waterLevel: 74 },
+};
+
 const ago = (min) => new Date(Date.now() - min * 60_000);
 
 export const DEMO_DEVICES = [

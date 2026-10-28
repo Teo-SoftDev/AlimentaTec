@@ -1,0 +1,68 @@
+openapi: 3.0.3
+info:
+  title: AlimentaTec · API de sensores
+  version: 1.0.0
+  description: |
+    Ingesta de telemetría de sensores de estanque. Autenticación por dispositivo:
+    cabecera `X-Device-Id` + `Authorization: Bearer <API key | JWT de 15 min>`.
+    Sin CORS (los sensores no son navegadores). Límites: 30 lecturas/min por dispositivo,
+    6 lotes/min, 10 fallos de autenticación / 15 min por IP.
+servers:
+  - url: https://{proyecto}.web.app/api/v1
+    variables: { proyecto: { default: alimentatec-2aae9 } }
+security: [ { deviceKey: [], deviceId: [] } ]
+components:
+  securitySchemes:
+    deviceKey: { type: http, scheme: bearer, description: API key del dispositivo (se muestra una sola vez al registrarlo) o JWT obtenido en /auth/token }
+    deviceId: { type: apiKey, in: header, name: X-Device-Id }
+  schemas:
+    Readings:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        temperature: { type: number, minimum: -5, maximum: 45, description: °C }
+        ph: { type: number, minimum: 0, maximum: 14 }
+        oxygen: { type: number, minimum: 0, maximum: 25, description: mg/L }
+        waterLevel: { type: number, minimum: 0, maximum: 100, description: "% de capacidad" }
+    Telemetry:
+      type: object
+      additionalProperties: false
+      required: [readingId, pondId, readings]
+      properties:
+        readingId: { type: string, pattern: '^[A-Za-z0-9_-]{8,64}$', description: Idempotencia. Reenviar el mismo id no duplica. }
+        pondId: { type: string, pattern: '^[A-Z]{2}-\d{2}$', example: AQ-04 }
+        sensorType: { type: string, enum: [multiparametric, temperature, ph, oxygen, level], default: multiparametric }
+        ts: { description: Epoch ms o ISO-8601 (máx. 7 días atrás, 5 min adelante), oneOf: [ { type: integer }, { type: string, format: date-time } ] }
+        readings: { $ref: '#/components/schemas/Readings' }
+        battery: { type: integer, minimum: 0, maximum: 100 }
+        rssi: { type: integer, minimum: -130, maximum: 0 }
+        firmware: { type: string, pattern: '^\d{1,2}\.\d{1,2}\.\d{1,3}$' }
+    Error:
+      type: object
+      properties: { error: { type: string }, message: { type: string }, requestId: { type: string }, issues: { type: array, items: { type: object } } }
+paths:
+  /health:
+    get: { security: [], summary: Estado del servicio, responses: { '200': { description: ok } } }
+  /auth/token:
+    post:
+      summary: Intercambia la API key por un JWT HS256 de 15 minutos
+      responses: { '200': { description: "{ token, tokenType, expiresIn }" }, '401': { description: Credenciales inválidas }, '429': { description: Límite de tasa }, '503': { description: JWT no configurado } }
+  /telemetry:
+    post:
+      summary: Envía una lectura
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Telemetry' } } } }
+      responses:
+        '202': { description: Aceptada (actualiza estado del estanque; dispara alertas críticas) }
+        '200': { description: Duplicada (idempotente) }
+        '401': { description: Credenciales inválidas (respuesta genérica) }
+        '403': { description: Dispositivo no autorizado o estanque ajeno }
+        '413': { description: Cuerpo demasiado grande (16 KB) }
+        '415': { description: Content-Type distinto de application/json }
+        '422': { description: Payload inválido / fuera de rango / marca de tiempo inválida }
+        '429': { description: Límite de tasa (cabecera Retry-After) }
+  /telemetry/batch:
+    post:
+      summary: Lote de hasta 50 lecturas (reenvío tras pérdida de red)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [readings], properties: { readings: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/Telemetry' } } } } } } }
+      responses: { '200': { description: "{ results[], accepted, duplicates, rejected }" }, '422': { description: Ninguna lectura aceptada } }
