@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { db } from "../firebase.js";
 import AppLayout from "../components/AppLayout.jsx";
@@ -9,6 +10,7 @@ import { Banner, Card, DemoBadge, Field, PageHeader, btnOutline, btnPrimary, inp
 import { useAuth } from "../context/AuthContext.jsx";
 import { useCollection } from "../hooks/useCollection.js";
 import { writeAudit } from "../services/audit.js";
+import { useSimulator } from "../simulator/SimulatorContext.jsx";
 import { sendCommand } from "../services/commands.js";
 import { PONDS, SENSOR_LABELS, SENSOR_SNAPSHOT, pondName } from "../utils/constants.js";
 import { DEMO_DEVICES, DEMO_SCHEDULES } from "../utils/demoData.js";
@@ -33,6 +35,7 @@ export default function Schedules() {
   const { actor, can } = useAuth();
   const canWrite = can("schedule:write");
   const schedulesQ = useCollection("schedules", { orderByField: "time", limitN: 200, fallback: DEMO_SCHEDULES });
+  const sim = useSimulator();
   const devicesQ = useCollection("devices", { limitN: 200, fallback: DEMO_DEVICES });
   const [pond, setPond] = useState("AQ-04");
   const [draft, setDraft] = useState(BLANK);
@@ -55,6 +58,7 @@ export default function Schedules() {
   const doneKg = today.filter((s) => toMin(s.time) * 60 < nowSec).reduce((a, s) => a + s.doseKg, 0);
   const totalKg = today.reduce((a, s) => a + s.doseKg, 0);
 
+  const tolvaOf = (pondId) => devicesQ.items.find((d) => d.type === "tolva" && d.pondId === pondId && d.status !== "revoked");
   const setD = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
   const toggleDay = (d) => setD("days", draft.days.includes(d) ? draft.days.filter((x) => x !== d) : DAYS.filter((x) => x === d || draft.days.includes(x)));
   const flash = (tone, text) => setNotice({ tone, text });
@@ -79,8 +83,9 @@ export default function Schedules() {
       await setDoc(doc(db, "schedules", newId), { ...v.data, updatedBy: a.uid, updatedAt: serverTimestamp() });
       // A09: marca temporal (servidor), operador, sesión y diff quedan en el registro de auditoría.
       writeAudit({ actor: a, type: "schedule_change", target: v.data.name, details: { pond: v.data.pondId, hora: v.data.time, dosisKg: v.data.doseKg, campos: changed.join(",") || "sin cambios" } });
-      setDraft({ ...BLANK, pondId: pond });
-      flash("success", "Horario guardado y registrado en la auditoría.");
+      setPond(v.data.pondId);
+      setDraft({ ...BLANK, pondId: v.data.pondId });
+      flash("success", `Horario guardado para ${pondName(v.data.pondId)}. Se ejecutará solo a la hora indicada y podrá verlo en Monitoreo.`);
     } catch (err) {
       flash("error", friendlyError(err));
     } finally {
@@ -129,7 +134,7 @@ export default function Schedules() {
         subtitle="Línea de tiempo de 24 h, editor de disparos y automatizaciones por condición de sensores."
         actions={
           <div>
-            <label htmlFor="pond" className="block text-label-sm font-label-sm text-secondary mb-1">Estanque</label>
+            <label htmlFor="pond" className="block text-label-sm font-label-sm text-secondary mb-1">Ver horarios de</label>
             <select id="pond" className={`${inputCls} w-64`} value={pond} onChange={(e) => { setPond(e.target.value); setDraft({ ...BLANK, pondId: e.target.value }); }}>
               {PONDS.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.species}</option>)}
             </select>
@@ -186,6 +191,17 @@ export default function Schedules() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Field label="Nombre" htmlFor="s-name" error={errors.name} required><input id="s-name" className={inputCls} maxLength={60} value={draft.name} onChange={(e) => setD("name", e.target.value)} /></Field>
                 <Field label="Hora de activación (24 h)" htmlFor="s-time" error={errors.time} required><input id="s-time" type="time" className={`${inputCls} font-mono`} value={draft.time} onChange={(e) => setD("time", e.target.value)} /></Field>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Estanque a automatizar" htmlFor="s-pond" error={errors.pondId} required>
+                  <select id="s-pond" className={inputCls} value={draft.pondId} onChange={(e) => setD("pondId", e.target.value)}>
+                    {PONDS.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.species}</option>)}
+                  </select>
+                </Field>
+                <div className={`rounded-lg border px-3 py-2 text-body-sm self-end ${tolvaOf(draft.pondId) ? "bg-green-50 border-green-200 text-green-900" : "bg-amber-50 border-amber-300 text-amber-900"}`}>
+                  <span className="material-symbols-outlined text-base align-middle mr-1" aria-hidden="true">{tolvaOf(draft.pondId) ? "check_circle" : "warning"}</span>
+                  {tolvaOf(draft.pondId) ? <>Comedero: <strong>{tolvaOf(draft.pondId).name}</strong></> : <>Este estanque no tiene comedero registrado (se simulará igualmente).</>}
+                </div>
               </div>
               <div>
                 <span className="block text-sm font-semibold text-on-surface mb-2">Repetición semanal</span>
@@ -267,6 +283,8 @@ export default function Schedules() {
                     <div className="text-[12px] text-secondary">{s.days.join(", ")} • {s.doseKg} kg • {MECH_LABELS[s.mechanism][0]}{s.conditions?.length ? ` • ${s.conditions.length} regla(s)` : ""}</div>
                     <div className="flex gap-3 text-label-sm">
                       <button className="text-primary font-semibold hover:underline" onClick={() => { setDraft({ ...BLANK, ...s }); setErrors({}); }}>Editar</button>
+                      {sim.canControl && <button className="text-primary font-semibold hover:underline" onClick={async () => { const r = await sim.runNow(s); flash(r.started ? "success" : "warn", r.started ? `Prueba iniciada en ${pondName(s.pondId)}: abra Monitoreo para ver caer la comida.` : "Esa prueba ya se ejecutó hace un momento. Espere un minuto."); }}>Probar ahora</button>}
+                      <Link className="text-primary font-semibold hover:underline" to={`/monitoreo?pond=${s.pondId}`}>Ver en Monitoreo</Link>
                       {canWrite && !s._demo && <button className="text-error font-semibold hover:underline" onClick={() => setConfirm({ kind: "delete", s })}>Eliminar</button>}
                     </div>
                   </div>

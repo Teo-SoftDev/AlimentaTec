@@ -216,6 +216,8 @@ export function AuthProvider({ children }) {
       user,
       profile,
       role,
+      claimRole,
+      profileRole: profile?.role || null,
       sessionId,
       cargandoSesion,
       rolReady,
@@ -231,7 +233,7 @@ export function AuthProvider({ children }) {
       setPin,
       verifyPin,
     }),
-    [user, profile, role, sessionId, cargandoSesion, rolReady, profileError, audit, iniciarSesion, registrarse, cerrarSesion, recuperarContrasena, hasPin, setPin, verifyPin]
+    [user, profile, role, claimRole, sessionId, cargandoSesion, rolReady, profileError, audit, iniciarSesion, registrarse, cerrarSesion, recuperarContrasena, hasPin, setPin, verifyPin]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

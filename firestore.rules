@@ -187,6 +187,14 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    /* ---------- sonda de versión de reglas ---------- */
+    // La app lee meta/rules-v3 (que no existe): si responde "permission-denied", las reglas
+    // desplegadas son anteriores a esta versión y hay que volver a publicarlas.
+    match /meta/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
     /* ---------- telemetría recibida por la API (solo la escribe el servidor) ---------- */
     match /pondStatus/{id} {
       allow read: if canReadOps();

@@ -96,8 +96,10 @@ export function SimulatorProvider({ children }) {
 
   const start = useCallback(() => { if (!canControl) return; storage.set(LS_ENABLED, "1"); sim.start(); }, [sim, canControl]);
   const stop = useCallback(() => { storage.set(LS_ENABLED, "0"); sim.stop(); }, [sim]);
-  useEffect(() => { if (canControl && storage.get(LS_ENABLED) === "1") sim.start(); if (!logged) sim.stop(); }, [sim, canControl, logged]);
+  // Por defecto el simulador queda activo; solo se detiene si el usuario lo pide.
+  useEffect(() => { if (canControl && storage.get(LS_ENABLED) !== "0") sim.start(); if (!logged) sim.stop(); }, [sim, canControl, logged]);
 
+  const runNow = useCallback((schedule) => (canControl ? sim.runNow(schedule) : Promise.resolve({ started: false, reason: "forbidden" })), [sim, canControl]);
   const setBehavior = useCallback((b) => { storage.set(LS_BEHAVIOR, b); sim.setBehavior(b); }, [sim]);
   const setSpeed = useCallback((s) => sim.setSpeed(s), [sim]);
 
@@ -117,8 +119,8 @@ export function SimulatorProvider({ children }) {
   }, [eventsQ.items, eventsQ.loading, toast]);
 
   const value = useMemo(
-    () => ({ snap, events: eventsQ.items, eventsLoading: eventsQ.loading, hostState, simOnline, setSimOnline, browserOnline, canControl, isHost: snap.enabled, start, stop, setBehavior, setSpeed, schedules: schedulesQ.items, schedulesDemo: schedulesQ.isDemo }),
-    [snap, eventsQ.items, eventsQ.loading, hostState, simOnline, browserOnline, canControl, start, stop, setBehavior, setSpeed, schedulesQ.items, schedulesQ.isDemo]
+    () => ({ snap, events: eventsQ.items, eventsLoading: eventsQ.loading, hostState, simOnline, setSimOnline, browserOnline, canControl, isHost: snap.enabled, start, stop, runNow, setBehavior, setSpeed, schedules: schedulesQ.items, schedulesDemo: schedulesQ.isDemo }),
+    [snap, eventsQ.items, eventsQ.loading, hostState, simOnline, browserOnline, canControl, start, stop, runNow, setBehavior, setSpeed, schedulesQ.items, schedulesQ.isDemo]
   );
   return <SimulatorContext.Provider value={value}>{children}</SimulatorContext.Provider>;
 }

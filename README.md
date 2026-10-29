@@ -102,6 +102,22 @@ Motor de eventos temporales (`src/simulator/`) que cada segundo evalúa los hora
 ### Pruebas
 `npm test` ejecuta utilidades de seguridad, esquemas Zod + telemetría firmada, motor del simulador y la API (≈ 60 aserciones).
 
+## Solución de problemas
+
+**«No tengo permisos» al registrar un dispositivo (siendo Administrador)**
+1. *Reglas desactualizadas* (causa más común): la v3 guarda el hash de la clave en `deviceSecrets` y ya no en `devices`;
+   unas reglas antiguas lo rechazan. Publíquelas de nuevo: `firebase deploy --only firestore:rules`.
+   La app lo detecta sola (lee `meta/rules-v3`) y muestra un aviso rojo en *Dispositivos* y un mensaje específico al fallar el alta.
+2. *Rol*: el rol efectivo sale del *custom claim* `role` (prioridad) o de `users/{uid}.role`. Si difieren, el mensaje de error
+   lo indica; unifíquelos con `node scripts/set-role.mjs correo admin` y vuelva a iniciar sesión.
+
+## Horarios y Monitoreo por estanque
+- **Horarios**: cada horario se asigna a un estanque concreto («Estanque a automatizar»), muestra su comedero y puede probarse al
+  instante con **Probar ahora**.
+- **Monitoreo**: elija el estanque (también `?pond=AQ-04`). Cuando se cumple un horario de *ese* estanque (o se dispensa manualmente),
+  la cámara simulada muestra caer la comida y reaccionar a los peces, con barra de progreso y nombre del horario. El simulador de
+  horarios queda activo por defecto para Administrador/Operador (se detiene desde *Simulador*).
+
 ## Estructura
 
 ```

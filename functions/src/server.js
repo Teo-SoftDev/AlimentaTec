@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { buildApi } from "./app.js";
 import { sha256Hex } from "./security.js";
 import { createMemoryStore } from "./stores/memoryStore.js";
+import { createFirestoreStore } from "./stores/firestoreStore.js";
 import { attachWebSocket } from "./wsServer.js";
 import { pathToFileURL } from "node:url";
 

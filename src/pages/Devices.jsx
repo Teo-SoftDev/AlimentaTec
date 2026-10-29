@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { deleteDoc, doc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { db } from "../firebase.js";
 import AppLayout from "../components/AppLayout.jsx";
@@ -10,6 +10,7 @@ import { Banner, Card, DemoBadge, KpiCard, PageHeader, Spinner, btnOutline, btnP
 import { useAuth } from "../context/AuthContext.jsx";
 import { toDate, useCollection } from "../hooks/useCollection.js";
 import { sendCommand } from "../services/commands.js";
+import { RULES_HINT, rulesAreCurrent } from "../utils/rulesProbe.js";
 import { writeAudit } from "../services/audit.js";
 import { DEMO_DEVICES } from "../utils/demoData.js";
 import { friendlyError } from "../utils/errors.js";
@@ -41,6 +42,8 @@ export default function Devices() {
   const [notice, setNotice] = useState(null);
   const [autoState, setAutoState] = useState({});
   const [newCreds, setNewCreds] = useState(null);
+  const [rulesOk, setRulesOk] = useState(true);
+  useEffect(() => { if (can("devices:write")) rulesAreCurrent().then(setRulesOk); }, [can]);
 
   const list = useMemo(() => {
     const q = sanitizeText(search).toLowerCase();
@@ -113,6 +116,7 @@ export default function Devices() {
         subtitle="Alta, estado, baja y control de tolvas automáticas y sensores multiparamétricos."
         actions={can("devices:write") ? <button className={btnPrimary} onClick={() => setRegisterOpen(true)}><span className="material-symbols-outlined text-[18px]" aria-hidden="true">add_circle</span>Registrar dispositivo</button> : <span className="text-label-sm font-label-sm text-secondary">Solo un Administrador puede registrar dispositivos</span>}
       />
+      {!rulesOk && <Banner tone="error" icon="gpp_maybe"><strong>No podrá registrar dispositivos todavía.</strong> {RULES_HINT}</Banner>}
       {error && <Banner tone="warn">{error}</Banner>}
       {notice && <Banner tone={notice.tone}>{notice.text}</Banner>}
       {isDemo && <Banner tone="info" icon="science">Mostrando dispositivos de demostración. Registre un dispositivo real y esta lista pasará a mostrar solo los suyos.</Banner>}

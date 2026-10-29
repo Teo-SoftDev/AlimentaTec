@@ -11,6 +11,7 @@ import { Banner, Field, btnOutline, btnPrimary, inputCls } from "../components/u
 import { useAuth } from "../context/AuthContext.jsx";
 import { sha256Hex, randomToken } from "../utils/crypto.js";
 import { friendlyError } from "../utils/errors.js";
+import { explainDenied, rulesAreCurrent } from "../utils/rulesProbe.js";
 import { checkRegistrationRate, formatRetry } from "../utils/rateLimiter.js";
 import { DEVICE_TYPES, PROTOCOLS, deviceSchema, qrPayloadSchema, validate } from "../utils/validation.js";
 import { PONDS } from "../utils/constants.js";
@@ -18,7 +19,7 @@ import { PONDS } from "../utils/constants.js";
 const EMPTY = { serial: "", name: "", type: "tolva", pondId: PONDS[0].id, protocol: "LoRaWAN", firmware: "1.0.0" };
 
 export default function DevicesRegister({ open, onClose }) {
-  const { actor, can, audit } = useAuth();
+  const { actor, can, audit, role, claimRole, profileRole } = useAuth();
   const [tab, setTab] = useState("serial");
   const [form, setForm] = useState(EMPTY);
   const [qrText, setQrText] = useState("");
@@ -117,7 +118,10 @@ export default function DevicesRegister({ open, onClose }) {
       audit("device_add", d.serial, { tipo: d.type, pond: d.pondId, protocolo: d.protocol }, "info");
       setCreds({ serial: d.serial, clientId, username, password, topic: `alimentatec/${d.serial}/#` });
     } catch (err) {
-      setError(friendlyError(err));
+      if (err?.code === "permission-denied") {
+        const outdated = !(await rulesAreCurrent());
+        setError(explainDenied({ role, claimRole, profileRole, outdated }));
+      } else setError(friendlyError(err));
     } finally {
       setBusy(false);
     }

@@ -91,3 +91,15 @@ clock = { t: day(6, 0) }; ({ sim, db } = make(clock)); sim.setSchedules([S()]); 
 clock.t += 60_000 * 2; await sim.tick(); // 2 min reales = 24 h virtuales
 assert.ok([...db.events.keys()].every((k) => k.startsWith("x")));
 console.log("SIMULADOR: TODAS LAS PRUEBAS PASARON ✔");
+
+// 9) «Probar ahora»: ejecuta ya, es simulado, no duplica en el mismo minuto y no consume el horario real
+{
+  const clockR = { t: day(10, 15, 0) }; const { sim, db } = make(clockR); sim.setSchedules([S({ time: "16:00" })]); sim.start();
+  const r1 = await sim.runNow(S({ time: "16:00" })); await new Promise((r) => setTimeout(r, 30));
+  assert.equal(r1.started, true);
+  const ev = [...db.events.values()][0]; assert.ok(ev.occurrenceId.startsWith("x")); assert.equal(ev.simulated, true); assert.equal(ev.status, "completed");
+  assert.equal((await sim.runNow(S({ time: "16:00" }))).started, false);
+  clockR.t = day(16, 0) + 500; await sim.tick();
+  assert.ok(db.events.has("sch1_2024-06-10_1600"));
+  console.log("RUN-NOW ✔");
+}

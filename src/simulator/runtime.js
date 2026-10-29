@@ -112,6 +112,22 @@ export class FeedingSimulator {
     this._emit();
   }
 
+  /** Ejecuta un horario ahora mismo (prueba). Se marca como simulado y no consume el horario real del día. */
+  async runNow(schedule) {
+    const at = new Date(this.vnow());
+    const hhmm = `${String(at.getHours()).padStart(2, "0")}${String(at.getMinutes()).padStart(2, "0")}`;
+    const [occ] = occurrencesBetween([{ ...schedule, enabled: true, days: ["D", "L", "M", "X", "J", "V", "S"], time: `${hhmm.slice(0, 2)}:${hhmm.slice(2)}` }], this.vnow() - 1, this.vnow() + 61_000, { prefix: "x" });
+    if (!occ) return { started: false, reason: "invalid" };
+    const id = `x${schedule.id}_${occ.id.slice(occ.id.indexOf("_") + 1)}`.replace(/^xx/, "x");
+    const test = { ...occ, id, scheduleName: schedule.name, atMs: this.vnow(), test: true };
+    if (this.seen.has(id) || this.running.some((r) => r.id === id)) return { started: false, reason: "duplicate" };
+    this.seen.add(id);
+    this._persistSeen();
+    this.queue.push(test);
+    this.drain().then(() => this._emit());
+    return { started: true, id };
+  }
+
   /* ---------- ejecución en cascada ---------- */
   async drain() {
     if (this.draining) return;
@@ -137,7 +153,7 @@ export class FeedingSimulator {
       occurrenceId: occ.id, scheduleId: occ.scheduleId, scheduleName: occ.scheduleName, pondId: occ.pondId,
       plannedKg: occ.doseKg, doseKg: dec.dose, durationSec: occ.durationSec, mechanism: occ.mechanism,
       late, delayMin: Math.max(0, Math.round(delay / 60000)), scheduledAtMs: occ.atMs, executedAtMs: Math.round(this.vnow()),
-      simulated: this.speed > 1, offlineExecuted: offlineExec, reason: dec.reason || "",
+      simulated: this.speed > 1 || !!occ.test, offlineExecuted: offlineExec, reason: dec.reason || "",
     };
     if (late) this.stats.late++;
 
